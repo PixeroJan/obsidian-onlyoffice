@@ -1,0 +1,10 @@
+{
+  "id": "onlyoffice",
+  "name": "OnlyOffice",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Edit DOCX files using OnlyOffice Document Server",
+  "author": "Jan Sandström",
+  "authorUrl": "https://github.com/PixeroJan",
+  "isDesktopOnly": true
+}

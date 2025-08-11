@@ -1,0 +1,13 @@
+{
+  "onlyOfficeServerPort": 8080,
+  "jwtSecret": "your-secret-key-please-change",
+  "localServerAddress": "192.168.1.228",
+  "htmlServerPort": 0,
+  "callbackServerPort": 0,
+  "useRequestToken": true,
+  "useSystemSaveAs": true,
+  "serverPort": 8080,
+  "staticServerBaseUrl": "http://192.168.1.228:8081",
+  "uploadCallbackUrl": "http://192.168.1.228:8082/callback",
+  "startDocxPath": "Start.docx"
+}

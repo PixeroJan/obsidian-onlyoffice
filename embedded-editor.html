@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>OnlyOffice Embedded Editor</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+    #placeholder { width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <div id="placeholder"></div>
+  <script>
+    // Host injects a script that defines init payload
+    (function() {
+      function boot() {
+        if (!window.__OO_INIT__) { return setTimeout(boot, 50); }
+        const { apiScriptUrl, buildConfig, bridge } = window.__OO_INIT__;
+        const script = document.createElement('script');
+        script.src = apiScriptUrl;
+        script.onload = function() {
+          try {
+            const cfg = buildConfig();
+            // Wire events into both config.events and editorConfig.events for compatibility
+            cfg.events = cfg.events || {};
+            cfg.editorConfig = cfg.editorConfig || {};
+            cfg.editorConfig.events = cfg.editorConfig.events || {};
+            const ev = {
+              onAppReady: function() { bridge('onlyoffice-app-ready', {}); },
+              onDocumentStateChange: function(e){ bridge('onlyoffice-dirty-state', { isDirty: !!(e && e.data) }); },
+              onDocumentContentChanged: function(){ bridge('onlyoffice-dirty-state', { isDirty: true }); },
+              onDownloadAs: function(e){ bridge('onlyoffice-save-as', e && e.data || {}); },
+              onRequestSaveAs: function(e){ bridge('onlyoffice-save-as', e && e.data || {}); },
+              onRequestCreateNew: function(e){ bridge('onlyoffice-create-new', e && e.data || {}); }
+            };
+            Object.assign(cfg.events, ev);
+            Object.assign(cfg.editorConfig.events, ev);
+
+            window.docEditor = new window.DocsAPI.DocEditor('placeholder', cfg);
+            console.log('[embedded-editor] initialized');
+
+            // Messages from /api/* pages
+            window.addEventListener('message', function(ev){
+              if (!ev || !ev.data) return;
+              if (ev.data.type === 'onlyoffice-save-as') bridge('onlyoffice-save-as', ev.data.data || {});
+              if (ev.data.type === 'onlyoffice-create-new') bridge('onlyoffice-create-new', ev.data || {});
+            });
+          } catch (err) {
+            console.error('[embedded-editor] init error', err);
+          }
+        };
+        script.onerror = function(){ console.error('[embedded-editor] failed to load API', apiScriptUrl); };
+        document.head.appendChild(script);
+      }
+      boot();
+    })();
+  </script>
+</body>
+</html>
