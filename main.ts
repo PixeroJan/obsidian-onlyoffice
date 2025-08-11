@@ -32,6 +32,7 @@ interface OnlyOfficePluginSettings {
     useSystemSaveAs?: boolean; // open download in external browser instead of in-app prompt
     hideDownloadAs?: boolean; // hide Download/Download copy menu entry
     promptNameOnCreate?: boolean; // prompt user for name before creating new file
+    restrictToLocalhost?: boolean; // if true bind servers to 127.0.0.1 only
 }
 
 // Default settings - RADICALLY SIMPLIFIED
@@ -45,6 +46,7 @@ const DEFAULT_SETTINGS: OnlyOfficePluginSettings = {
     useSystemSaveAs: false,
     hideDownloadAs: true,
     promptNameOnCreate: true,
+    restrictToLocalhost: false,
 };
 
 // Define the OnlyOffice document view (reuse single view for multiple formats)
@@ -77,6 +79,9 @@ interface IOnlyOfficePlugin extends Plugin {
     callbackServer: http.Server | null;
     localServerPort: number;
     callbackServerPort: number;
+    internalServerReady?: Promise<void> | null;
+    _resolveInternalServerReady?: (()=>void) | null;
+    _rejectInternalServerReady?: ((reason?: any)=>void) | null;
     openDocxFile(file: TFile): Promise<void>;
     openOnlyOfficeFile(file: TFile): Promise<void>; // generic multi-format opener
     openNewDocument(): Promise<void>;
@@ -205,9 +210,13 @@ class OnlyOfficeDocumentView extends FileView {
                 this.dirtyCheckInterval = null;
             }
 
+            // Wait for internal server readiness if available
+            if (this.plugin.internalServerReady) {
+                try { await this.plugin.internalServerReady; } catch { /* ignore, fallback to existing polling */ }
+            }
             const localHostBaseUrl = `http://127.0.0.1:${this.plugin.localServerPort}`;
             const dockerHostBaseUrl = `http://${this.plugin.settings.localServerAddress || 'host.docker.internal'}:${this.plugin.localServerPort}`;
-            const _editorUrl = `${localHostBaseUrl}/editor.html`;
+            const _editorUrl = `${localHostBaseUrl}/embedded-editor.html`;
 
             // --- More robust server availability check ---
             let htmlOk = false;
@@ -1114,6 +1123,9 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
     callbackServer: http.Server | null = null; 
     localServerPort: number = 0; 
     callbackServerPort: number = 0; 
+    internalServerReady: Promise<void> | null = null;
+    _resolveInternalServerReady: (()=>void) | null = null;
+    _rejectInternalServerReady: ((reason?: any)=>void) | null = null;
     keyFileMap: Record<string,string> = {};
     saveAsPromise: {
         resolve: (data: ArrayBuffer) => void,
@@ -1435,6 +1447,11 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
             new Notice("OnlyOffice plugin requires a file system adapter to run the local server.");
             return;
         }
+        // Initialize readiness promise (reset each start attempt)
+        this.internalServerReady = new Promise<void>((resolve, reject) => {
+            this._resolveInternalServerReady = resolve;
+            this._rejectInternalServerReady = reject;
+        });
         const vaultPath = this.app.vault.adapter.getBasePath();
         let pluginPath = this.manifest.dir;
         if (pluginPath && !path.isAbsolute(pluginPath)) {
@@ -1450,12 +1467,22 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         console.log("Editor HTML path:", editorHtmlPath);
         console.log("Editor HTML exists:", fs.existsSync(editorHtmlPath));
 
-        // Use configured port unless 0 (then start at 8081 dynamically)
-        let port = (this.settings.htmlServerPort === 0 ? 8081 : (this.settings.htmlServerPort || 8081));
-        const maxPort = port + 50;
-        let serverStarted = false;
-
-        while (port < maxPort && !serverStarted) {
+        // Dynamic per-vault port strategy:
+        // If user specified a port (>0), attempt only that. Otherwise derive a stable base from vault path hash.
+        const explicitPort = this.settings.htmlServerPort && this.settings.htmlServerPort > 0 ? this.settings.htmlServerPort : 0;
+        const hashVault = (s:string)=>{ let h=0; for (let i=0;i<s.length;i++) h = (Math.imul(31,h)+s.charCodeAt(i))>>>0; return h; };
+        let candidatePorts: number[] = [];
+        if (explicitPort) {
+            candidatePorts.push(explicitPort);
+        } else {
+            const base = 28100 + (hashVault(vaultPath) % 700); // 28100-28799 spread
+            for (let i=0;i<12;i++) candidatePorts.push(base + i); // small scan window
+            candidatePorts.push(0); // fallback: OS ephemeral
+        }
+        let serverStarted = false; let port = 0;
+        for (const tryPort of candidatePorts) {
+            if (serverStarted) break;
+            port = tryPort;
             try {
                 this.httpServer = http.createServer((req, res) => {
                     // --- LOG EVERY REQUEST ---
@@ -1494,30 +1521,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                             return;
                         }
 
-                        if (reqPath === '/' || reqPath === '/editor.html') {
-                            console.log('Serving editor.html from:', editorHtmlPath);
-                            if (!fs.existsSync(editorHtmlPath)) {
-                                res.writeHead(404, { 'Content-Type': 'text/plain' });
-                                res.end('editor.html not found');
-                                return;
-                            }
-                            fs.readFile(editorHtmlPath, (err, data) => {
-                                if (err) {
-                                    res.writeHead(500, { 'Content-Type': 'text/plain' });
-                                    res.end('Error reading editor.html');
-                                    return;
-                                }
-                                res.writeHead(200, {
-                                    'Content-Type': 'text/html; charset=UTF-8',
-                                    'Content-Length': Buffer.byteLength(data),
-                                    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
-                                    'Pragma': 'no-cache',
-                                    'Expires': '0',
-                                    'Surrogate-Control': 'no-store',
-                                });
-                                res.end(data);
-                            });
-                        } else if (reqPath === '/embedded-editor.html') {
+                        if (reqPath === '/' || reqPath === '/embedded-editor.html') {
                             const embeddedPath = path.join(resolvedPluginPath, 'embedded-editor.html');
                             if (!fs.existsSync(embeddedPath)) {
                                 res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -1570,11 +1574,15 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
 
                 await new Promise<void>((resolve, reject) => {
                     this.httpServer!.once('error', (err: any) => reject(err));
-                    this.httpServer!.listen(port, '0.0.0.0', () => resolve());
+                    const bindHost = this.settings.restrictToLocalhost ? '127.0.0.1' : '0.0.0.0';
+                    this.httpServer!.listen(port, bindHost, () => resolve());
                 });
 
-                this.localServerPort = port;
-                serverStarted = true;
+                if (port === 0) { // resolve ephemeral
+                    const addr = this.httpServer!.address();
+                    if (addr && typeof addr === 'object') port = addr.port;
+                }
+                this.localServerPort = port; serverStarted = true;
                 const os = require('os');
                 const interfaces = os.networkInterfaces();
                 let lanIps: string[] = [];
@@ -1586,11 +1594,15 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                     }
                 }
                 console.log(`OnlyOffice internal HTML server running at:`);
-                console.log(`  Local:   http://127.0.0.1:${port}/`);
-                lanIps.forEach(ip => console.log(`  LAN:     http://${ip}:${port}/`));
+                console.log(`  Local:   http://127.0.0.1:${port}/embedded-editor.html`);
+                if (!this.settings.restrictToLocalhost) {
+                    lanIps.forEach(ip => console.log(`  LAN:     http://${ip}:${port}/`));
+                } else {
+                    console.log('  LAN:     (disabled by restrictToLocalhost setting)');
+                }
                 try {
                     const testResponse = await requestUrl({
-                        url: `http://127.0.0.1:${port}/editor.html`,
+                        url: `http://127.0.0.1:${port}/embedded-editor.html`,
                         method: 'HEAD',
                         headers: { 'Cache-Control': 'no-cache' }
                     });
@@ -1599,57 +1611,61 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                     console.error("Server test failed:", err);
                 }
             } catch (err: any) {
-                console.log(`Port ${port} is not available:`, err.message);
-                port++;
+                console.warn(`OnlyOffice internal server: port ${port} failed (${err?.message||err}).`);
+                try { this.httpServer?.close(); } catch {}
             }
         }
         if (!serverStarted) {
-            new Notice(`OnlyOffice plugin could not find an open port between 8081 and ${maxPort}.`);
+            new Notice('OnlyOffice: failed to start internal server (no free port)');
+            this._rejectInternalServerReady?.(new Error('failed to start'));
+        } else {
+            this._resolveInternalServerReady?.();
         }
     }
     // Start an internal OnlyOffice callback server
     async startCallbackServer() {
-    // Pick a configured port unless 0 (dynamic starting at 8082)
-    let port = (this.settings.callbackServerPort === 0 ? 8082 : (this.settings.callbackServerPort || 8082));
-    const maxPort = port + 1000; // Try many ports if the preferred one is busy
-        let serverStarted = false;
-        let lastError = null;
-
-        while (port < maxPort && !serverStarted) {
+        // Strategy mirrors internal HTML server: explicit port if >0, else derive
+        // a stable hash-based base port per vault in a separate range to avoid clashes.
+        if (!(this.app.vault.adapter instanceof FileSystemAdapter)) {
+            console.warn('OnlyOffice callback server requires a file system adapter.');
+            this.callbackServerPort = 0;
+            return;
+        }
+        const vaultPath = this.app.vault.adapter.getBasePath();
+        const explicitPort = this.settings.callbackServerPort && this.settings.callbackServerPort > 0 ? this.settings.callbackServerPort : 0;
+        const hashVault = (s:string)=>{ let h=0; for (let i=0;i<s.length;i++) h = (Math.imul(31,h)+s.charCodeAt(i))>>>0; return h; };
+        // Use a different range than the HTML server (28100-28799) to minimize overlap.
+        // Callback server range: 28800-29499 (700 span)
+        let candidatePorts: number[] = [];
+        if (explicitPort) {
+            candidatePorts.push(explicitPort);
+        } else {
+            const base = 28800 + (hashVault(vaultPath) % 700);
+            for (let i=0;i<12;i++) candidatePorts.push(base + i);
+            candidatePorts.push(0); // OS ephemeral fallback
+        }
+        let serverStarted = false; let chosenPort = 0;
+        for (const tryPort of candidatePorts) {
+            if (serverStarted) break;
             try {
                 this.callbackServer = http.createServer(async (req, res) => {
-                    // Add CORS headers to all responses
                     res.setHeader('Access-Control-Allow-Origin', '*');
                     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
                     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-                    
-                    // Handle preflight OPTIONS requests
-                    if (req.method === 'OPTIONS') {
-                        res.writeHead(200);
-                        res.end();
-                        return;
-                    }
-                    
-                    // Log all requests for debugging
+                    if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
                     console.log(`[Callback] ${req.method} ${req.url}`);
-                    
-                    // Normalize path (strip query) so /callback?token=... is accepted
                     const rawUrl = req.url || '/';
                     const pathOnly = rawUrl.split('?')[0];
                     if (req.method === 'POST' && pathOnly === '/callback') {
                         let body = '';
-                        req.on('data', chunk => { body += chunk; });
+                        req.on('data', c => { body += c; });
                         req.on('end', async () => {
                             try {
                                 console.log('[Callback] Received data:', body);
-                                let data;
-                                try {
-                                    data = JSON.parse(body);
-                                } catch (e) {
-                                    console.error('[Callback] Failed to parse JSON:', e);
-                                    // Try to handle non-JSON data
-                                    if (body.includes('url=') && body.includes('&')) {
-                                        // Handle form-encoded data
+                                let data: any;
+                                try { data = JSON.parse(body); } catch (e) {
+                                    console.error('[Callback] JSON parse failed, attempting form:', e);
+                                    if (body.includes('=') && body.includes('&')) {
                                         const params = new URLSearchParams(body);
                                         data = Object.fromEntries(params);
                                     } else {
@@ -1658,148 +1674,75 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                                         return;
                                     }
                                 }
-                                
-                                // OnlyOffice callback: status 2 = must save, status 6 = must force save
-                                // Also handle cases where status might be a string or missing
-                                const status = parseInt(data.status) || 0;
-                                
+                                const status = parseInt(data?.status) || 0;
                                 if (data && (status === 2 || status === 6 || status === 0) && data.url) {
-                                    console.log('[Callback] Processing save request with URL:', data.url);
-                                    
-                                    // Extract key from data or URL
+                                    console.log('[Callback] Processing save with URL:', data.url);
                                     let key = data.key;
                                     if (!key && data.url) {
-                                        // Try to extract key from URL if not in data
-                                        try {
-                                            const urlObj = new URL(data.url);
-                                            key = urlObj.searchParams.get('key');
-                                        } catch (e) {
-                                            console.error('[Callback] Error parsing URL:', e);
-                                        }
+                                        try { const u = new URL(data.url); key = u.searchParams.get('key'); } catch(e){ console.error('[Callback] URL parse error:', e); }
                                     }
-                                    
                                     if (key) {
-                                        console.log('[Callback] Using key:', key);
                                         let filePath: string | null = null;
-                                        // New mapping first
-                                        if (this.keyFileMap && this.keyFileMap[key]) {
-                                            filePath = this.keyFileMap[key];
-                                            console.log('[Callback] Resolved file path from map:', filePath);
-                                        } else {
-                                            // Legacy pattern support
-                                            const match = /^obsidian_(.+?)_\d+_[a-z0-9]+$/.exec(key);
-                                            if (match) {
-                                                filePath = decodeURIComponent(match[1]);
-                                                console.log('[Callback] Extracted legacy file path:', filePath);
-                                            }
+                                        if (this.keyFileMap?.[key]) filePath = this.keyFileMap[key]; else {
+                                            const m = /^obsidian_(.+?)_\d+_[a-z0-9]+$/.exec(key);
+                                            if (m) filePath = decodeURIComponent(m[1]);
                                         }
                                         if (filePath) {
                                             const file = this.app.vault.getAbstractFileByPath(filePath);
                                             if (file instanceof TFile) {
-                                                // Download the new file from OnlyOffice and overwrite in vault
-                                                console.log('[Callback] Downloading from URL:', data.url);
                                                 try {
-                                                    const response = await requestUrl({ 
-                                                        url: data.url, 
-                                                        method: 'GET',
-                                                        headers: { 'Cache-Control': 'no-cache' }
-                                                    });
+                                                    const response = await requestUrl({ url: data.url, method: 'GET', headers: { 'Cache-Control': 'no-cache' } });
                                                     if (response.status === 200 && response.arrayBuffer) {
                                                         await this.app.vault.modifyBinary(file, response.arrayBuffer);
-                                                        new Notice('OnlyOffice: Document saved from callback');
-                                                        console.log('[Callback] Document saved successfully');
+                                                        new Notice('OnlyOffice: Document saved (callback)');
+                                                        console.log('[Callback] Saved successfully');
                                                     } else {
-                                                        console.error('[Callback] Failed to download file, status:', response.status);
+                                                        console.error('[Callback] Download failed status:', response.status);
                                                     }
-                                                } catch (err) {
-                                                    console.error('[Callback] Error downloading file:', err);
-                                                }
-                                            } else {
-                                                console.error('[Callback] File not found in vault:', filePath);
-                                            }
-                                        } else {
-                                            console.error('[Callback] Could not resolve file path for key:', key);
-                                        }
-                                    } else {
-                                        console.error('[Callback] No key found in callback data');
-                                    }
+                                                } catch (err) { console.error('[Callback] Download error:', err); }
+                                            } else console.error('[Callback] File not found in vault:', filePath);
+                                        } else console.error('[Callback] Could not resolve file path for key:', key);
+                                    } else console.error('[Callback] No key in callback payload');
                                 } else {
-                                    console.log('[Callback] Received non-save status or missing URL:', data);
+                                    console.log('[Callback] Ignored status / missing URL:', data);
                                 }
-                                
-                                // Always return success to OnlyOffice
                                 res.writeHead(200, { 'Content-Type': 'application/json' });
                                 res.end(JSON.stringify({ error: 0 }));
                             } catch (err) {
-                                console.error('[Callback] Error processing callback:', err);
-                                // Still return success to OnlyOffice to avoid errors
+                                console.error('[Callback] Handler error:', err);
                                 res.writeHead(200, { 'Content-Type': 'application/json' });
                                 res.end(JSON.stringify({ error: 0 }));
                             }
                         });
                     } else {
-                        // Health check or mismatched path: still return JSON shape OnlyOffice expects
                         res.writeHead(200, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: 0, info: 'OnlyOffice callback server is running' }));
+                        res.end(JSON.stringify({ error: 0, info: 'OnlyOffice callback server running' }));
                     }
                 });
-
                 await new Promise<void>((resolve, reject) => {
-                    const timeoutId = setTimeout(() => {
-                        reject(new Error("Server start timed out"));
-                    }, 3000);
-                    
-                    this.callbackServer!.once('error', (err: any) => {
-                        clearTimeout(timeoutId);
-                        reject(err);
-                    });
-                    
-                    this.callbackServer!.listen(port, '0.0.0.0', () => {
-                        clearTimeout(timeoutId);
-                        resolve();
-                    });
+                    const timeoutId = setTimeout(()=>reject(new Error('Callback server start timeout')), 3000);
+                    this.callbackServer!.once('error', err=>{ clearTimeout(timeoutId); reject(err); });
+                    const bindHost = this.settings.restrictToLocalhost ? '127.0.0.1' : '0.0.0.0';
+                    this.callbackServer!.listen(tryPort, bindHost, ()=>{ clearTimeout(timeoutId); resolve(); });
                 });
-
-                this.callbackServerPort = port;
+                // Resolve actual port (ephemeral case)
+                const actual = (this.callbackServer!.address() as any)?.port || tryPort;
+                chosenPort = actual;
+                this.callbackServerPort = actual;
                 serverStarted = true;
-                console.log(`OnlyOffice callback server running on port ${port}`);
-                
-                // Test if the server is actually accessible
+                console.log(`OnlyOffice callback server running at http://127.0.0.1:${actual}/ (candidate requested ${tryPort})`);
                 try {
-                    const testResponse = await requestUrl({
-                        url: `http://127.0.0.1:${port}/`,
-                        method: 'HEAD',
-                        headers: { 'Cache-Control': 'no-cache' }
-                    });
-                    console.log("Callback server test result:", testResponse.status);
-                    new Notice(`OnlyOffice callback server running on port ${port} (status: ${testResponse.status})`);
-                } catch (err) {
-                    console.warn("Callback server test failed, but server appears to be running:", (err as Error).message);
-                    new Notice(`OnlyOffice callback server started on port ${port}, but test failed: ${(err as Error).message}`);
-                }
-            } catch (err: any) {
-                lastError = err;
-                console.log(`Port ${port} is not available: ${err.message}`);
-                
-                // Close the server if it was created but failed to start
-                if (this.callbackServer) {
-                    try {
-                        this.callbackServer.close();
-                    } catch (e) {
-                        // Ignore errors when closing
-                    }
-                    this.callbackServer = null;
-                }
-                
-                port++;
+                    const test = await requestUrl({ url: `http://127.0.0.1:${actual}/`, method: 'HEAD', headers: { 'Cache-Control': 'no-cache' } });
+                    console.log('Callback server test status:', test.status);
+                } catch (e) { console.warn('Callback server test failed:', (e as Error).message); }
+            } catch (err) {
+                console.warn(`Callback server port ${tryPort} failed:`, (err as Error).message);
+                try { this.callbackServer?.close(); } catch {}
+                this.callbackServer = null;
             }
         }
-
         if (!serverStarted) {
-            console.error(`OnlyOffice callback server could not find an open port between 8082 and ${maxPort}`, lastError);
-            new Notice(`OnlyOffice plugin could not start the callback server. Some features may not work correctly.`);
-            
-            // Set a dummy port so the rest of the plugin can function
+            new Notice('OnlyOffice: failed to start callback server (no free port)');
             this.callbackServerPort = 0;
         }
     }
@@ -1891,28 +1834,40 @@ class OnlyOfficeSettingTab extends PluginSettingTab {
                     this.plugin.settings.localServerAddress = value;
                     await this.plugin.saveSettings();
                 })));
+        const advHeader = containerEl.createEl('h4', { text: 'Advanced (normally leave defaults)' });
+        advHeader.style.marginTop = '1.5em';
 
         new Setting(containerEl)
-            .setName('Embedded HTML Server Port')
-            .setDesc('The port for the plugin’s internal HTML server (default 8081). Restart plugin after changing.')
+            .setName('Override HTML server port')
+            .setDesc('0 = automatic per-vault dynamic. Set only if you need a fixed port.')
             .addText(text => text
-                .setPlaceholder('8081')
-                .setValue(String(this.plugin.settings.htmlServerPort || 8081))
+                .setPlaceholder('0 (auto)')
+                .setValue(String(this.plugin.settings.htmlServerPort ?? 0))
                 .onChange(async (value) => {
-                    const v = Number(value) || 8081;
+                    const v = Number(value) || 0;
                     this.plugin.settings.htmlServerPort = v;
                     await this.plugin.saveSettings();
                 }));
 
         new Setting(containerEl)
-            .setName('Callback Server Port')
-            .setDesc('The port for the OnlyOffice callback server (default 8082). Restart plugin after changing.')
+            .setName('Override callback server port')
+            .setDesc('0 = automatic per-vault dynamic. Set only for special routing needs.')
             .addText(text => text
-                .setPlaceholder('8082')
-                .setValue(String(this.plugin.settings.callbackServerPort || 8082))
+                .setPlaceholder('0 (auto)')
+                .setValue(String(this.plugin.settings.callbackServerPort ?? 0))
                 .onChange(async (value) => {
-                    const v = Number(value) || 8082;
+                    const v = Number(value) || 0;
                     this.plugin.settings.callbackServerPort = v;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Restrict internal servers to localhost')
+            .setDesc('If ON, bind to 127.0.0.1 only (hide LAN URLs). Leave OFF if Docker/another host must reach them.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.restrictToLocalhost ?? false)
+                .onChange(async (value) => {
+                    this.plugin.settings.restrictToLocalhost = value;
                     await this.plugin.saveSettings();
                 }));
 
