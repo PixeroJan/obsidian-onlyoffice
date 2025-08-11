@@ -10620,7 +10620,8 @@ var DEFAULT_SETTINGS = {
   useRequestToken: true,
   useSystemSaveAs: false,
   hideDownloadAs: true,
-  promptNameOnCreate: true
+  promptNameOnCreate: true,
+  restrictToLocalhost: false
 };
 var VIEW_TYPE_ONLYOFFICE = "onlyoffice-docx";
 var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidian.FileView {
@@ -10715,9 +10716,15 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
         clearInterval(this.dirtyCheckInterval);
         this.dirtyCheckInterval = null;
       }
+      if (this.plugin.internalServerReady) {
+        try {
+          await this.plugin.internalServerReady;
+        } catch (e) {
+        }
+      }
       const localHostBaseUrl = `http://127.0.0.1:${this.plugin.localServerPort}`;
       const dockerHostBaseUrl = `http://${this.plugin.settings.localServerAddress || "host.docker.internal"}:${this.plugin.localServerPort}`;
-      const _editorUrl = `${localHostBaseUrl}/editor.html`;
+      const _editorUrl = `${localHostBaseUrl}/embedded-editor.html`;
       let htmlOk = false;
       let waited = 0;
       const maxWait = 5e3;
@@ -11499,6 +11506,9 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     this.callbackServer = null;
     this.localServerPort = 0;
     this.callbackServerPort = 0;
+    this.internalServerReady = null;
+    this._resolveInternalServerReady = null;
+    this._rejectInternalServerReady = null;
     this.keyFileMap = {};
     this.saveAsPromise = null;
   }
@@ -11834,10 +11844,15 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
   }
   // Start an internal HTTP server to serve vault files and editor.html
   async startInternalServer() {
+    var _a, _b, _c;
     if (!(this.app.vault.adapter instanceof import_obsidian.FileSystemAdapter)) {
       new import_obsidian.Notice("OnlyOffice plugin requires a file system adapter to run the local server.");
       return;
     }
+    this.internalServerReady = new Promise((resolve2, reject) => {
+      this._resolveInternalServerReady = resolve2;
+      this._rejectInternalServerReady = reject;
+    });
     const vaultPath = this.app.vault.adapter.getBasePath();
     let pluginPath = this.manifest.dir;
     if (pluginPath && !path.isAbsolute(pluginPath)) {
@@ -11850,13 +11865,31 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     console.log("Resolved plugin path:", resolvedPluginPath);
     console.log("Editor HTML path:", editorHtmlPath);
     console.log("Editor HTML exists:", fs.existsSync(editorHtmlPath));
-    let port = this.settings.htmlServerPort === 0 ? 8081 : this.settings.htmlServerPort || 8081;
-    const maxPort = port + 50;
+    const explicitPort = this.settings.htmlServerPort && this.settings.htmlServerPort > 0 ? this.settings.htmlServerPort : 0;
+    const hashVault = (s) => {
+      let h = 0;
+      for (let i = 0; i < s.length; i++)
+        h = Math.imul(31, h) + s.charCodeAt(i) >>> 0;
+      return h;
+    };
+    let candidatePorts = [];
+    if (explicitPort) {
+      candidatePorts.push(explicitPort);
+    } else {
+      const base = 28100 + hashVault(vaultPath) % 700;
+      for (let i = 0; i < 12; i++)
+        candidatePorts.push(base + i);
+      candidatePorts.push(0);
+    }
     let serverStarted = false;
-    while (port < maxPort && !serverStarted) {
+    let port = 0;
+    for (const tryPort of candidatePorts) {
+      if (serverStarted)
+        break;
+      port = tryPort;
       try {
         this.httpServer = http.createServer((req, res) => {
-          var _a;
+          var _a2;
           console.log("[HTTP] Request URL:", req.url);
           res.setHeader("Access-Control-Allow-Origin", "*");
           res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
@@ -11867,7 +11900,7 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
             return;
           }
           try {
-            let reqPath = decodeURIComponent(((_a = req.url) == null ? void 0 : _a.split("?")[0]) || "/");
+            let reqPath = decodeURIComponent(((_a2 = req.url) == null ? void 0 : _a2.split("?")[0]) || "/");
             if (reqPath === "/api/createNew") {
               console.log("[HTTP] Create New document request");
               res.writeHead(200, { "Content-Type": "text/html" });
@@ -11883,30 +11916,7 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
               res.end(`<!DOCTYPE html><html><head><script>window.parent.postMessage({type:'onlyoffice-save-as',data:{url:'${url}',title:'${title}',format:'docx'}},'*');setTimeout(()=>window.close(),100);</script></head><body>Saving document as...</body></html>`);
               return;
             }
-            if (reqPath === "/" || reqPath === "/editor.html") {
-              console.log("Serving editor.html from:", editorHtmlPath);
-              if (!fs.existsSync(editorHtmlPath)) {
-                res.writeHead(404, { "Content-Type": "text/plain" });
-                res.end("editor.html not found");
-                return;
-              }
-              fs.readFile(editorHtmlPath, (err, data) => {
-                if (err) {
-                  res.writeHead(500, { "Content-Type": "text/plain" });
-                  res.end("Error reading editor.html");
-                  return;
-                }
-                res.writeHead(200, {
-                  "Content-Type": "text/html; charset=UTF-8",
-                  "Content-Length": Buffer.byteLength(data),
-                  "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-                  "Pragma": "no-cache",
-                  "Expires": "0",
-                  "Surrogate-Control": "no-store"
-                });
-                res.end(data);
-              });
-            } else if (reqPath === "/embedded-editor.html") {
+            if (reqPath === "/" || reqPath === "/embedded-editor.html") {
               const embeddedPath = path.join(resolvedPluginPath, "embedded-editor.html");
               if (!fs.existsSync(embeddedPath)) {
                 res.writeHead(404, { "Content-Type": "text/plain" });
@@ -11958,8 +11968,14 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
         });
         await new Promise((resolve2, reject) => {
           this.httpServer.once("error", (err) => reject(err));
-          this.httpServer.listen(port, "0.0.0.0", () => resolve2());
+          const bindHost = this.settings.restrictToLocalhost ? "127.0.0.1" : "0.0.0.0";
+          this.httpServer.listen(port, bindHost, () => resolve2());
         });
+        if (port === 0) {
+          const addr = this.httpServer.address();
+          if (addr && typeof addr === "object")
+            port = addr.port;
+        }
         this.localServerPort = port;
         serverStarted = true;
         const os = require("os");
@@ -11973,11 +11989,15 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
           }
         }
         console.log(`OnlyOffice internal HTML server running at:`);
-        console.log(`  Local:   http://127.0.0.1:${port}/`);
-        lanIps.forEach((ip) => console.log(`  LAN:     http://${ip}:${port}/`));
+        console.log(`  Local:   http://127.0.0.1:${port}/embedded-editor.html`);
+        if (!this.settings.restrictToLocalhost) {
+          lanIps.forEach((ip) => console.log(`  LAN:     http://${ip}:${port}/`));
+        } else {
+          console.log("  LAN:     (disabled by restrictToLocalhost setting)");
+        }
         try {
           const testResponse = await (0, import_obsidian.requestUrl)({
-            url: `http://127.0.0.1:${port}/editor.html`,
+            url: `http://127.0.0.1:${port}/embedded-editor.html`,
             method: "HEAD",
             headers: { "Cache-Control": "no-cache" }
           });
@@ -11986,21 +12006,50 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
           console.error("Server test failed:", err);
         }
       } catch (err) {
-        console.log(`Port ${port} is not available:`, err.message);
-        port++;
+        console.warn(`OnlyOffice internal server: port ${port} failed (${(err == null ? void 0 : err.message) || err}).`);
+        try {
+          (_a = this.httpServer) == null ? void 0 : _a.close();
+        } catch (e) {
+        }
       }
     }
     if (!serverStarted) {
-      new import_obsidian.Notice(`OnlyOffice plugin could not find an open port between 8081 and ${maxPort}.`);
+      new import_obsidian.Notice("OnlyOffice: failed to start internal server (no free port)");
+      (_b = this._rejectInternalServerReady) == null ? void 0 : _b.call(this, new Error("failed to start"));
+    } else {
+      (_c = this._resolveInternalServerReady) == null ? void 0 : _c.call(this);
     }
   }
   // Start an internal OnlyOffice callback server
   async startCallbackServer() {
-    let port = this.settings.callbackServerPort === 0 ? 8082 : this.settings.callbackServerPort || 8082;
-    const maxPort = port + 1e3;
+    var _a, _b;
+    if (!(this.app.vault.adapter instanceof import_obsidian.FileSystemAdapter)) {
+      console.warn("OnlyOffice callback server requires a file system adapter.");
+      this.callbackServerPort = 0;
+      return;
+    }
+    const vaultPath = this.app.vault.adapter.getBasePath();
+    const explicitPort = this.settings.callbackServerPort && this.settings.callbackServerPort > 0 ? this.settings.callbackServerPort : 0;
+    const hashVault = (s) => {
+      let h = 0;
+      for (let i = 0; i < s.length; i++)
+        h = Math.imul(31, h) + s.charCodeAt(i) >>> 0;
+      return h;
+    };
+    let candidatePorts = [];
+    if (explicitPort) {
+      candidatePorts.push(explicitPort);
+    } else {
+      const base = 28800 + hashVault(vaultPath) % 700;
+      for (let i = 0; i < 12; i++)
+        candidatePorts.push(base + i);
+      candidatePorts.push(0);
+    }
     let serverStarted = false;
-    let lastError = null;
-    while (port < maxPort && !serverStarted) {
+    let chosenPort = 0;
+    for (const tryPort of candidatePorts) {
+      if (serverStarted)
+        break;
       try {
         this.callbackServer = http.createServer(async (req, res) => {
           res.setHeader("Access-Control-Allow-Origin", "*");
@@ -12016,18 +12065,19 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
           const pathOnly = rawUrl.split("?")[0];
           if (req.method === "POST" && pathOnly === "/callback") {
             let body = "";
-            req.on("data", (chunk) => {
-              body += chunk;
+            req.on("data", (c) => {
+              body += c;
             });
             req.on("end", async () => {
+              var _a2;
               try {
                 console.log("[Callback] Received data:", body);
                 let data;
                 try {
                   data = JSON.parse(body);
                 } catch (e) {
-                  console.error("[Callback] Failed to parse JSON:", e);
-                  if (body.includes("url=") && body.includes("&")) {
+                  console.error("[Callback] JSON parse failed, attempting form:", e);
+                  if (body.includes("=") && body.includes("&")) {
                     const params = new URLSearchParams(body);
                     data = Object.fromEntries(params);
                   } else {
@@ -12036,120 +12086,98 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
                     return;
                   }
                 }
-                const status = parseInt(data.status) || 0;
+                const status = parseInt(data == null ? void 0 : data.status) || 0;
                 if (data && (status === 2 || status === 6 || status === 0) && data.url) {
-                  console.log("[Callback] Processing save request with URL:", data.url);
+                  console.log("[Callback] Processing save with URL:", data.url);
                   let key = data.key;
                   if (!key && data.url) {
                     try {
-                      const urlObj = new URL(data.url);
-                      key = urlObj.searchParams.get("key");
+                      const u = new URL(data.url);
+                      key = u.searchParams.get("key");
                     } catch (e) {
-                      console.error("[Callback] Error parsing URL:", e);
+                      console.error("[Callback] URL parse error:", e);
                     }
                   }
                   if (key) {
-                    console.log("[Callback] Using key:", key);
                     let filePath = null;
-                    if (this.keyFileMap && this.keyFileMap[key]) {
+                    if ((_a2 = this.keyFileMap) == null ? void 0 : _a2[key])
                       filePath = this.keyFileMap[key];
-                      console.log("[Callback] Resolved file path from map:", filePath);
-                    } else {
-                      const match = /^obsidian_(.+?)_\d+_[a-z0-9]+$/.exec(key);
-                      if (match) {
-                        filePath = decodeURIComponent(match[1]);
-                        console.log("[Callback] Extracted legacy file path:", filePath);
-                      }
+                    else {
+                      const m = /^obsidian_(.+?)_\d+_[a-z0-9]+$/.exec(key);
+                      if (m)
+                        filePath = decodeURIComponent(m[1]);
                     }
                     if (filePath) {
                       const file = this.app.vault.getAbstractFileByPath(filePath);
                       if (file instanceof import_obsidian.TFile) {
-                        console.log("[Callback] Downloading from URL:", data.url);
                         try {
-                          const response = await (0, import_obsidian.requestUrl)({
-                            url: data.url,
-                            method: "GET",
-                            headers: { "Cache-Control": "no-cache" }
-                          });
+                          const response = await (0, import_obsidian.requestUrl)({ url: data.url, method: "GET", headers: { "Cache-Control": "no-cache" } });
                           if (response.status === 200 && response.arrayBuffer) {
                             await this.app.vault.modifyBinary(file, response.arrayBuffer);
-                            new import_obsidian.Notice("OnlyOffice: Document saved from callback");
-                            console.log("[Callback] Document saved successfully");
+                            new import_obsidian.Notice("OnlyOffice: Document saved (callback)");
+                            console.log("[Callback] Saved successfully");
                           } else {
-                            console.error("[Callback] Failed to download file, status:", response.status);
+                            console.error("[Callback] Download failed status:", response.status);
                           }
                         } catch (err) {
-                          console.error("[Callback] Error downloading file:", err);
+                          console.error("[Callback] Download error:", err);
                         }
-                      } else {
+                      } else
                         console.error("[Callback] File not found in vault:", filePath);
-                      }
-                    } else {
+                    } else
                       console.error("[Callback] Could not resolve file path for key:", key);
-                    }
-                  } else {
-                    console.error("[Callback] No key found in callback data");
-                  }
+                  } else
+                    console.error("[Callback] No key in callback payload");
                 } else {
-                  console.log("[Callback] Received non-save status or missing URL:", data);
+                  console.log("[Callback] Ignored status / missing URL:", data);
                 }
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ error: 0 }));
               } catch (err) {
-                console.error("[Callback] Error processing callback:", err);
+                console.error("[Callback] Handler error:", err);
                 res.writeHead(200, { "Content-Type": "application/json" });
                 res.end(JSON.stringify({ error: 0 }));
               }
             });
           } else {
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: 0, info: "OnlyOffice callback server is running" }));
+            res.end(JSON.stringify({ error: 0, info: "OnlyOffice callback server running" }));
           }
         });
         await new Promise((resolve2, reject) => {
-          const timeoutId = setTimeout(() => {
-            reject(new Error("Server start timed out"));
-          }, 3e3);
+          const timeoutId = setTimeout(() => reject(new Error("Callback server start timeout")), 3e3);
           this.callbackServer.once("error", (err) => {
             clearTimeout(timeoutId);
             reject(err);
           });
-          this.callbackServer.listen(port, "0.0.0.0", () => {
+          const bindHost = this.settings.restrictToLocalhost ? "127.0.0.1" : "0.0.0.0";
+          this.callbackServer.listen(tryPort, bindHost, () => {
             clearTimeout(timeoutId);
             resolve2();
           });
         });
-        this.callbackServerPort = port;
+        const actual = ((_a = this.callbackServer.address()) == null ? void 0 : _a.port) || tryPort;
+        chosenPort = actual;
+        this.callbackServerPort = actual;
         serverStarted = true;
-        console.log(`OnlyOffice callback server running on port ${port}`);
+        console.log(`OnlyOffice callback server running at http://127.0.0.1:${actual}/ (candidate requested ${tryPort})`);
         try {
-          const testResponse = await (0, import_obsidian.requestUrl)({
-            url: `http://127.0.0.1:${port}/`,
-            method: "HEAD",
-            headers: { "Cache-Control": "no-cache" }
-          });
-          console.log("Callback server test result:", testResponse.status);
-          new import_obsidian.Notice(`OnlyOffice callback server running on port ${port} (status: ${testResponse.status})`);
-        } catch (err) {
-          console.warn("Callback server test failed, but server appears to be running:", err.message);
-          new import_obsidian.Notice(`OnlyOffice callback server started on port ${port}, but test failed: ${err.message}`);
+          const test = await (0, import_obsidian.requestUrl)({ url: `http://127.0.0.1:${actual}/`, method: "HEAD", headers: { "Cache-Control": "no-cache" } });
+          console.log("Callback server test status:", test.status);
+        } catch (e) {
+          console.warn("Callback server test failed:", e.message);
         }
       } catch (err) {
-        lastError = err;
-        console.log(`Port ${port} is not available: ${err.message}`);
-        if (this.callbackServer) {
-          try {
-            this.callbackServer.close();
-          } catch (e) {
-          }
-          this.callbackServer = null;
+        console.warn(`Callback server port ${tryPort} failed:`, err.message);
+        try {
+          (_b = this.callbackServer) == null ? void 0 : _b.close();
+        } catch (e) {
         }
-        port++;
+        this.callbackServer = null;
       }
     }
     if (!serverStarted) {
-      console.error(`OnlyOffice callback server could not find an open port between 8082 and ${maxPort}`, lastError);
-      new import_obsidian.Notice(`OnlyOffice plugin could not start the callback server. Some features may not work correctly.`);
+      new import_obsidian.Notice("OnlyOffice: failed to start callback server (no free port)");
       this.callbackServerPort = 0;
     }
   }
@@ -12206,16 +12234,31 @@ var OnlyOfficeSettingTab = class extends import_obsidian.PluginSettingTab {
       this.plugin.settings.localServerAddress = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian.Setting(containerEl).setName("Embedded HTML Server Port").setDesc("The port for the plugin\u2019s internal HTML server (default 8081). Restart plugin after changing.").addText((text) => text.setPlaceholder("8081").setValue(String(this.plugin.settings.htmlServerPort || 8081)).onChange(async (value) => {
-      const v = Number(value) || 8081;
-      this.plugin.settings.htmlServerPort = v;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Callback Server Port").setDesc("The port for the OnlyOffice callback server (default 8082). Restart plugin after changing.").addText((text) => text.setPlaceholder("8082").setValue(String(this.plugin.settings.callbackServerPort || 8082)).onChange(async (value) => {
-      const v = Number(value) || 8082;
-      this.plugin.settings.callbackServerPort = v;
-      await this.plugin.saveSettings();
-    }));
+    const advHeader = containerEl.createEl("h4", { text: "Advanced (normally leave defaults)" });
+    advHeader.style.marginTop = "1.5em";
+    new import_obsidian.Setting(containerEl).setName("Override HTML server port").setDesc("0 = automatic per-vault dynamic. Set only if you need a fixed port.").addText((text) => {
+      var _a;
+      return text.setPlaceholder("0 (auto)").setValue(String((_a = this.plugin.settings.htmlServerPort) != null ? _a : 0)).onChange(async (value) => {
+        const v = Number(value) || 0;
+        this.plugin.settings.htmlServerPort = v;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Override callback server port").setDesc("0 = automatic per-vault dynamic. Set only for special routing needs.").addText((text) => {
+      var _a;
+      return text.setPlaceholder("0 (auto)").setValue(String((_a = this.plugin.settings.callbackServerPort) != null ? _a : 0)).onChange(async (value) => {
+        const v = Number(value) || 0;
+        this.plugin.settings.callbackServerPort = v;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Restrict internal servers to localhost").setDesc("If ON, bind to 127.0.0.1 only (hide LAN URLs). Leave OFF if Docker/another host must reach them.").addToggle((toggle) => {
+      var _a;
+      return toggle.setValue((_a = this.plugin.settings.restrictToLocalhost) != null ? _a : false).onChange(async (value) => {
+        this.plugin.settings.restrictToLocalhost = value;
+        await this.plugin.saveSettings();
+      });
+    });
     new import_obsidian.Setting(containerEl).setName("Append request token to URLs").setDesc("Toggle adding ?token=... to document and callback URLs (disable if your server does not use request verification).").addToggle((toggle) => {
       var _a;
       return toggle.setValue((_a = this.plugin.settings.useRequestToken) != null ? _a : true).onChange(async (value) => {
