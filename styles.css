@@ -1,0 +1,21 @@
+.onlyoffice-root { height:100%; width:100%; display:flex; flex-direction:column; }
+.onlyoffice-webview { width:100%; height:100%; border:none; }
+.onlyoffice-cancel-btn { margin-left:10px; }
+.onlyoffice-adv-header { margin-top:1.5em; }
+.onlyoffice-webview-wrapper { flex-grow:1; position:relative; width:100%; height:100%; }
+.onlyoffice-loading { position:absolute; top:50%; left:50%; transform:translate(-50%, -50%); z-index:10; background:rgba(255,255,255,0.9); padding:24px 40px; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.1); font-size:1.2em; color:#333; }
+.onlyoffice-error { padding:16px; background:var(--background-secondary); border:1px solid var(--background-modifier-border); border-radius:6px; }
+
+/* New Document Modal */
+.oo-modal { padding:26px 32px 22px; min-width:600px; max-width:600px; box-sizing:border-box; overflow:hidden; }
+.oo-modal h2 { margin:0 0 16px 0; font-weight:600; font-size:22px; letter-spacing:.4px; }
+.oo-form-wrapper { display:flex; flex-direction:column; gap:16px; }
+.oo-grid { display:grid; gap:18px; grid-template-columns:320px 118px; align-items:end; width:536px; }
+.oo-field-col { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.oo-field-col label { font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--text-muted); }
+.oo-input { padding:8px 12px; font-size:14px; line-height:20px; height:40px; border:1px solid var(--background-modifier-border); border-radius:10px; width:100%; max-width:320px; box-sizing:border-box; background:var(--background-primary); }
+.oo-select { padding:8px 12px; font-size:14px; line-height:20px; height:40px; border:1px solid var(--background-modifier-border); border-radius:10px; background:var(--background-primary); box-sizing:border-box; width:118px; }
+.oo-btn-row { display:flex; justify-content:flex-end; gap:10px; margin-top:6px; width:536px; }
+.oo-btn { padding:8px 20px; font-size:14px; font-weight:500; border:none; border-radius:10px; cursor:pointer; line-height:20px; }
+.oo-btn-cancel { background:var(--background-modifier-border); color:var(--text-normal); }
+.oo-btn-primary { background:var(--interactive-accent); color:var(--text-on-accent,#fff); }

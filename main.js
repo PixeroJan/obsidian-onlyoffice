@@ -10621,10 +10621,11 @@ var DEFAULT_SETTINGS = {
   useSystemSaveAs: false,
   hideDownloadAs: true,
   promptNameOnCreate: true,
-  restrictToLocalhost: false
+  restrictToLocalhost: false,
+  debugLogging: false
 };
 var VIEW_TYPE_ONLYOFFICE = "onlyoffice-docx";
-var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidian.FileView {
+var OnlyOfficeDocumentView = class extends import_obsidian.FileView {
   constructor(leaf, plugin) {
     super(leaf);
     // The `file` property is now inherited from ItemView and managed by Obsidian's core.
@@ -10633,7 +10634,7 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
     this.iframe = null;
     // Make viewId public and stable
     this.boundMessageHandler = null;
-    this.fallbackEditor = null;
+    // Fallback editor removed
     this.isDirty = false;
     // Add a dirty flag
     this.pendingSaveAsName = null;
@@ -10827,7 +10828,8 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
   async onUnloadFile(file) {
     var _a;
     if (this.isDirty) {
-      console.log("OnlyOffice: onUnloadFile triggered for dirty file, attempting to save.");
+      if (this.plugin.settings.debugLogging)
+        console.log("OnlyOffice: onUnloadFile triggered for dirty file, attempting to save.");
       try {
         (_a = this.webview) == null ? void 0 : _a.executeJavaScript(`window.docEditor?.serviceCommand("c:forcesave", "");`);
         new import_obsidian.Notice("Saving document on close...");
@@ -10835,7 +10837,8 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
         console.error("OnlyOffice: Failed to trigger save on close.", error);
       }
     } else {
-      console.log("OnlyOffice: onUnloadFile triggered for clean file, no save needed.");
+      if (this.plugin.settings.debugLogging)
+        console.log("OnlyOffice: onUnloadFile triggered for clean file, no save needed.");
     }
     if (this.boundMessageHandler) {
       window.removeEventListener("message", this.boundMessageHandler);
@@ -10853,16 +10856,16 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
   }
   // Load the OnlyOffice editor directly in the interface
   async loadDirectOnlyOfficeInterface(container, hostFileUrl, dockerFileUrl, dockerBaseUrl, callbackUrl, file, isStartDocx, uniqueKey) {
-    console.log("Loading OnlyOffice editor interface");
-    console.log("OnlyOffice debug: hostFileUrl", hostFileUrl, "dockerFileUrl", dockerFileUrl, "callbackUrl", callbackUrl);
+    if (this.plugin.settings.debugLogging) {
+      if (this.plugin.settings.debugLogging) {
+        console.log("Loading OnlyOffice editor interface");
+        console.log("OnlyOffice debug: hostFileUrl", hostFileUrl, "dockerFileUrl", dockerFileUrl, "callbackUrl", callbackUrl);
+      }
+    }
     container.empty();
-    container.style.cssText = "height: 100%; width: 100%; display: flex; flex-direction: column;";
-    const webviewContainer = container.createEl("div", {
-      attr: { style: "flex-grow: 1; position: relative; width: 100%; height: 100%;" }
-    });
-    const loadingDiv = container.createEl("div", {
-      attr: { style: "position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; background: rgba(255,255,255,0.9); padding: 24px 40px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); font-size: 1.2em; color: #333;" }
-    });
+    container.classList.add("onlyoffice-root");
+    const webviewContainer = container.createEl("div", { cls: "onlyoffice-webview-wrapper" });
+    const loadingDiv = container.createEl("div", { cls: "onlyoffice-loading" });
     loadingDiv.textContent = "Loading OnlyOffice editor...";
     this._didFinishLoadListener = null;
     this._didFailLoadListener = null;
@@ -10875,7 +10878,7 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
     webview.setAttribute("webpreferences", "contextIsolation=false, nodeIntegration=true");
     webview.setAttribute("partition", "persist:onlyoffice");
     webview.setAttribute("allowpopups", "true");
-    webview.style.cssText = "width: 100%; height: 100%; border: none;";
+    webview.classList.add("onlyoffice-webview");
     webview.src = `http://127.0.0.1:${this.plugin.localServerPort}/embedded-editor.html`;
     webviewContainer.appendChild(webview);
     const documentUrl = isStartDocx ? `${dockerBaseUrl}/assets/Start.docx` : dockerFileUrl;
@@ -10885,7 +10888,7 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
       documentType,
       document: {
         fileType: ext || "docx",
-        key: uniqueKey,
+        key: uniqueKey || "oo_key_missing",
         title: file ? file.name : documentUrl.split("/").pop() || "Document.docx",
         url: documentUrl,
         permissions: {
@@ -10942,9 +10945,11 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
           baseConfig.editorConfig.callbackUrl = append(baseConfig.editorConfig.callbackUrl);
           baseConfig.editorConfig.createUrl = append(baseConfig.editorConfig.createUrl);
           baseConfig.editorConfig.saveAsUrl = append(baseConfig.editorConfig.saveAsUrl);
-          console.log("OnlyOffice: appended request token to URLs");
+          if (this.plugin.settings.debugLogging)
+            console.log("OnlyOffice: appended request token to URLs");
         } else {
-          console.log("OnlyOffice: request token appending disabled");
+          if (this.plugin.settings.debugLogging)
+            console.log("OnlyOffice: request token appending disabled");
         }
         const payload = {
           document: baseConfig.document,
@@ -10958,7 +10963,8 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
       }
     }
     webview.addEventListener("did-finish-load", () => {
-      console.log("OnlyOffice webview did-finish-load, injecting init script");
+      if (this.plugin.settings.debugLogging)
+        console.log("OnlyOffice webview did-finish-load, injecting init script");
       const apiScriptUrl = `http://${this.plugin.settings.localServerAddress || "host.docker.internal"}:${this.plugin.settings.onlyOfficeServerPort}/web-apps/apps/api/documents/api.js`;
       console.log("OnlyOffice DEBUG: apiScriptUrl:", apiScriptUrl);
       const initScript = `
@@ -10970,7 +10976,7 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
                 const script = document.createElement('script');
                 script.src = '${apiScriptUrl}';
                 script.onload = function() {
-                    console.log('API script loaded');
+                    if (console && console.log) console.log('API script loaded');
                     try {
                         const { ipcRenderer } = (typeof require === 'function' ? require('electron') : { ipcRenderer: null });
                         const __sendToHost = (channel, data) => {
@@ -11026,7 +11032,7 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
                 __sendToHost('onlyoffice-create-new', { fileType: (event && event.data && event.data['fileType']) || 'docx' });
                             },
                             onRequestSaveAs: function(event) {
-                                console.log('OnlyOffice onRequestSaveAs', event);
+                                if (console && console.log) console.log('OnlyOffice onRequestSaveAs', event);
                 __sendToHost('onlyoffice-save-as', event && event.data ? event.data : {});
                             }
                         };
@@ -11072,7 +11078,7 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
                                     try {
                                         if (window.docEditor && !window.docEditor[guardProp] && window.docEditor.downloadAs) {
                                             const orig = window.docEditor.downloadAs.bind(window.docEditor);
-                                            window.docEditor.downloadAs = function(){ console.log('OnlyOffice: downloadAs blocked'); return null; };
+                                            window.docEditor.downloadAs = function(){ if (console && console.log) console.log('OnlyOffice: downloadAs blocked'); return null; };
                                             window.docEditor[guardProp] = true;
                                         }
                                     } catch(e){}
@@ -11103,7 +11109,8 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
                         // (Removed legacy attachEvent attempts to reduce errors)
                     } catch (e) {
                         console.error("Error initializing editor with dynamic config:", e);
-                        document.getElementById('placeholder').innerHTML = '<div style="padding: 20px; color: red;">Failed to initialize editor: ' + e.message + '</div>';
+                        const ph = document.getElementById('placeholder');
+                        if (ph) { ph.textContent = 'Failed to initialize editor: ' + (e && e.message ? e.message : 'Unknown error'); }
                     }
                 };
                 document.head.appendChild(script);
@@ -11215,83 +11222,16 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
     const errorDiv = container.createEl("div", { cls: "onlyoffice-error" });
     errorDiv.createEl("h2", { text: "OnlyOffice Editor Error" });
     errorDiv.createEl("p", { text: message2 });
-    const fallbackButton = errorDiv.createEl("button", {
-      text: "Use Fallback Editor",
-      attr: { style: "margin-top: 10px; padding: 8px 16px; background: #007ACC; color: white; border: none; border-radius: 4px; cursor: pointer;" }
-    });
-    fallbackButton.addEventListener("click", () => {
-      this.loadFallbackEditor(container);
-    });
+    errorDiv.createEl("p", { text: "Verify the internal server, OnlyOffice Document Server, and JWT secret (if enabled)." });
   }
   // Load a simple fallback editor
-  loadFallbackEditor(container) {
-    container.empty();
-    const editorDiv = container.createEl("div", {
-      attr: {
-        style: "width: 100%; height: 100%; display: flex; flex-direction: column; background: white;"
-      }
-    });
-    const toolbar = editorDiv.createEl("div", {
-      attr: {
-        style: "padding: 8px; border-bottom: 1px solid #ccc; background: #f5f5f5; display: flex; gap: 8px; flex-shrink: 0;"
-      }
-    });
-    this.addToolbarButton(toolbar, "Bold", () => document.execCommand("bold"));
-    this.addToolbarButton(toolbar, "Italic", () => document.execCommand("italic"));
-    this.addToolbarButton(toolbar, "Underline", () => document.execCommand("underline"));
-    const saveButton = toolbar.createEl("button", {
-      text: "Save to Obsidian",
-      attr: {
-        style: "margin-left: auto; padding: 4px 12px; background: #007ACC; color: white; border: none; border-radius: 4px; cursor: pointer;"
-      }
-    });
-    saveButton.addEventListener("click", () => this.saveFallbackToObsidian());
-    this.fallbackEditor = editorDiv.createEl("div", {
-      attr: {
-        contenteditable: "true",
-        style: "flex: 1; padding: 20px; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.5; overflow-y: auto; background: white;"
-      }
-    });
-    this.fallbackEditor.innerHTML = "<p>Start typing your document here...</p>";
-    this.fallbackEditor.focus();
-  }
+  // Fallback editor removed
   // Add toolbar button helper
-  addToolbarButton(toolbar, text, action) {
-    const button = toolbar.createEl("button", {
-      text,
-      attr: {
-        style: "padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer; border-radius: 3px;"
-      }
-    });
-    button.addEventListener("click", action);
-  }
+  // Toolbar helper removed
   // Save fallback editor content to Obsidian
-  async saveFallbackToObsidian() {
-    if (!this.fallbackEditor) {
-      new import_obsidian.Notice("No content to save");
-      return;
-    }
-    try {
-      const htmlContent = this.fallbackEditor.innerHTML;
-      const markdownContent = _OnlyOfficeDocumentView.htmlToMarkdown(htmlContent);
-      const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-");
-      const fileName = `OnlyOffice Document ${timestamp}.md`;
-      await this.app.vault.create(fileName, markdownContent);
-      new import_obsidian.Notice(`Document saved as: ${fileName}`);
-      const file = this.app.vault.getAbstractFileByPath(fileName);
-      if (file instanceof import_obsidian.TFile) {
-        await this.app.workspace.openLinkText(fileName, "");
-      }
-    } catch (error) {
-      console.error("Error saving to Obsidian:", error);
-      new import_obsidian.Notice("Error saving document: " + error.message);
-    }
-  }
+  // saveFallbackToObsidian removed
   // Static HTML to Markdown converter for fallback editor
-  static htmlToMarkdown(html) {
-    let markdown = html.replace(/<strong[^>]*>(.*?)<\/strong>/gi, "**$1**").replace(/<b[^>]*>(.*?)<\/b>/gi, "**$1**").replace(/<em[^>]*>(.*?)<\/em>/gi, "*$1*").replace(/<i[^>]*>(.*?)<\/i>/gi, "*$1*").replace(/<u[^>]*>(.*?)<\/u>/gi, "<u>$1</u>").replace(/<p[^>]*>(.*?)<\/p>/gi, "$1\n\n").replace(/<br[^>]*>/gi, "\n").replace(/<div[^>]*>(.*?)<\/div>/gi, "$1\n").replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\n\s*\n\s*\n/g, "\n\n").trim();
-    return markdown || "Empty document";
-  }
+  // htmlToMarkdown removed
   // Add a manual save method as fallback
   async manualSaveFromEditor() {
     if (!this.file) {
@@ -11318,10 +11258,6 @@ var OnlyOfficeDocumentView = class _OnlyOfficeDocumentView extends import_obsidi
   // Add the missing saveAsDocument method with improved functionality
   async saveAsDocument(forceSaveAs = false, saveAsData) {
     var _a, _b, _c;
-    if (this.fallbackEditor) {
-      await this.saveFallbackToObsidian();
-      return;
-    }
     try {
       const activeExt = this.currentExt || ((_b = (_a = this.file) == null ? void 0 : _a.extension) == null ? void 0 : _b.toLowerCase()) || "docx";
       if (saveAsData && saveAsData.url) {
@@ -11487,7 +11423,7 @@ var SaveAsModal = class extends import_obsidian.Modal {
       }
     });
     const cancelButton = contentEl.createEl("button", { text: "Cancel" });
-    cancelButton.style.marginLeft = "10px";
+    cancelButton.classList.add("onlyoffice-cancel-btn");
     cancelButton.addEventListener("click", () => {
       this.close();
     });
@@ -11513,9 +11449,29 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     this.saveAsPromise = null;
   }
   async onload() {
+    var _a, _b, _c;
     await this.loadSettings();
     await this.startInternalServer();
     await this.startCallbackServer();
+    try {
+      const cssPath = path.join(this.manifest.dir || "", "styles.css");
+      if (fs.existsSync(path.join(((_b = (_a = this.app.vault.adapter).getBasePath) == null ? void 0 : _b.call(_a)) || "", cssPath))) {
+      } else {
+        const localCss = path.join(__dirname, "styles.css");
+        if (fs.existsSync(localCss)) {
+          const css = fs.readFileSync(localCss, "utf-8");
+          this.registerDomEvent(document, "DOMContentLoaded", () => {
+            const styleEl = document.createElement("style");
+            styleEl.setAttr("id", "onlyoffice-styles-inline");
+            styleEl.textContent = css;
+            document.head.appendChild(styleEl);
+          });
+        }
+      }
+    } catch (e) {
+      if ((_c = this.settings) == null ? void 0 : _c.debugLogging)
+        console.warn("OnlyOffice: failed to inject stylesheet", e);
+    }
     this.addRibbonIcon("file-plus", "New OnlyOffice Document", () => {
       this.openNewDocument();
     });
@@ -11528,7 +11484,8 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     for (const ext of officeExts) {
       try {
         this.registerExtensions([ext], VIEW_TYPE_ONLYOFFICE);
-        console.log(`OnlyOffice: registered extension .${ext}`);
+        if (this.settings.debugLogging)
+          console.log(`OnlyOffice: registered extension .${ext}`);
       } catch (e) {
         failed.push(ext);
         console.warn(`OnlyOffice: failed to register .${ext}:`, (e == null ? void 0 : e.message) || e);
@@ -11555,7 +11512,7 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
   addCommands() {
     this.addCommand({
       id: "open-docx-in-onlyoffice",
-      name: "Open DOCX in OnlyOffice",
+      name: "Open DOCX",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (file && file.extension === "docx") {
@@ -11569,7 +11526,7 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "open-xlsx-in-onlyoffice",
-      name: "Open XLSX in OnlyOffice",
+      name: "Open XLSX",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (file && file.extension === "xlsx") {
@@ -11583,7 +11540,7 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "open-pptx-in-onlyoffice",
-      name: "Open PPTX in OnlyOffice",
+      name: "Open PPTX",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (file && file.extension === "pptx") {
@@ -11597,7 +11554,7 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "open-pdf-in-onlyoffice",
-      name: "Open PDF in OnlyOffice (viewer)",
+      name: "Open PDF (viewer)",
       checkCallback: (checking) => {
         const file = this.app.workspace.getActiveFile();
         if (file && file.extension === "pdf") {
@@ -11611,12 +11568,14 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "onlyoffice-list-office-files",
-      name: "OnlyOffice: List Office Files (debug)",
+      name: "List Office Files (debug)",
       callback: async () => {
         try {
           const vaultFiles = this.app.vault.getFiles().filter((f) => ["docx", "xlsx", "pptx", "pdf"].includes(f.extension));
-          console.log("OnlyOffice DEBUG: vault reports", vaultFiles.length, "office files");
-          vaultFiles.forEach((f) => console.log("  VAULT:", f.path));
+          if (this.settings.debugLogging) {
+            console.log("OnlyOffice DEBUG: vault reports", vaultFiles.length, "office files");
+            vaultFiles.forEach((f) => console.log("  VAULT:", f.path));
+          }
           if (!(this.app.vault.adapter instanceof import_obsidian.FileSystemAdapter)) {
             console.log("OnlyOffice DEBUG: not FS adapter, cannot disk-scan");
             return;
@@ -11644,14 +11603,17 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
             }
           };
           walk(root);
-          console.log("OnlyOffice DEBUG: disk scan found", found.length, "office files");
+          if (this.settings.debugLogging)
+            console.log("OnlyOffice DEBUG: disk scan found", found.length, "office files");
           const rel = (p) => p.replace(/\\/g, "/").substring(root.replace(/\\/g, "/").length + 1);
           const vaultSet = new Set(vaultFiles.map((f) => f.path));
           const missingInVault = found.map(rel).filter((p) => !vaultSet.has(p));
-          if (missingInVault.length === 0)
-            console.log("OnlyOffice DEBUG: no discrepancies");
-          else {
-            console.warn("OnlyOffice DEBUG: files on disk NOT in vault index:", missingInVault);
+          if (this.settings.debugLogging) {
+            if (missingInVault.length === 0)
+              console.log("OnlyOffice DEBUG: no discrepancies");
+            else {
+              console.warn("OnlyOffice DEBUG: files on disk NOT in vault index:", missingInVault);
+            }
           }
           new import_obsidian.Notice("OnlyOffice: debug listing complete (see console)");
         } catch (e) {
@@ -11661,22 +11623,8 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
       }
     });
     this.addCommand({
-      id: "open-xlsx-in-onlyoffice",
-      name: "Open XLSX in OnlyOffice",
-      checkCallback: (checking) => {
-        const file = this.app.workspace.getActiveFile();
-        if (file && file.extension === "xlsx") {
-          if (!checking) {
-            this.openOnlyOfficeFile(file);
-          }
-          return true;
-        }
-        return false;
-      }
-    });
-    this.addCommand({
       id: "create-new-onlyoffice-document",
-      name: "Create New OnlyOffice Document",
+      name: "Create New Document",
       callback: () => {
         this.openNewDocument();
       }
@@ -11696,42 +11644,27 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
               this.submitted = false;
             }
             onOpen() {
-              const radius = "10px";
-              const fieldHeight = "40px";
               const { contentEl } = this;
               contentEl.empty();
-              contentEl.style.padding = "26px 32px 22px";
-              contentEl.style.minWidth = "600px";
-              contentEl.style.maxWidth = "600px";
-              contentEl.style.boxSizing = "border-box";
-              contentEl.style.overflow = "hidden";
-              contentEl.style.overflowX = "hidden";
-              if (contentEl.parentElement) {
-                contentEl.parentElement.style.overflowX = "hidden";
-              }
-              contentEl.createEl("h2", { text: "New OnlyOffice Document", attr: { style: "margin:0 0 16px 0; font-weight:600; font-size:22px; letter-spacing:.4px;" } });
-              this.wrapper = contentEl.createEl("div", { attr: { style: "display:flex; flex-direction:column; gap:16px;" } });
-              const formGap = 18;
-              const col1 = 320;
-              const col2 = 118;
-              const formWidth = col1 + col2 + formGap;
-              const row = this.wrapper.createEl("div", { attr: { style: `display:grid; grid-template-columns: ${col1}px ${col2}px; gap:${formGap}px; align-items:end; width:${formWidth}px;` } });
-              const nameCol = row.createEl("div", { attr: { style: "display:flex; flex-direction:column; gap:6px; min-width:0;" } });
-              nameCol.createEl("label", { text: "Filename", attr: { style: "font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--text-muted);" } });
-              this.input = nameCol.createEl("input", { type: "text", placeholder: "MyDocument", attr: { style: `padding:8px 12px; font-size:14px; line-height:20px; height:${fieldHeight}; border:1px solid var(--background-modifier-border); border-radius:${radius}; width:100%; max-width:${col1}px; box-sizing:border-box;` } });
-              const typeCol = row.createEl("div", { attr: { style: "display:flex; flex-direction:column; gap:6px;" } });
-              typeCol.createEl("label", { text: "Type", attr: { style: "font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--text-muted);" } });
-              this.select = typeCol.createEl("select", { attr: { style: `padding:8px 12px; font-size:14px; line-height:20px; height:${fieldHeight}; border:1px solid var(--background-modifier-border); border-radius:${radius}; background:var(--background-primary); box-sizing:border-box; width:${col2}px;` } });
+              contentEl.classList.add("oo-modal");
+              contentEl.createEl("h2", { text: "New OnlyOffice Document" });
+              this.wrapper = contentEl.createEl("div", { cls: "oo-form-wrapper" });
+              const row = this.wrapper.createEl("div", { cls: "oo-grid" });
+              const nameCol = row.createEl("div", { cls: "oo-field-col" });
+              nameCol.createEl("label", { text: "Filename" });
+              this.input = nameCol.createEl("input", { type: "text", placeholder: "MyDocument", cls: "oo-input" });
+              const typeCol = row.createEl("div", { cls: "oo-field-col" });
+              typeCol.createEl("label", { text: "Type" });
+              this.select = typeCol.createEl("select", { cls: "oo-select" });
               ["docx", "xlsx", "pptx"].forEach((t) => {
                 const o = document.createElement("option");
                 o.value = t;
                 o.textContent = t.toUpperCase();
                 this.select.appendChild(o);
               });
-              const btnRow = this.wrapper.createEl("div", { attr: { style: `display:flex; justify-content:flex-end; gap:10px; margin-top:6px; width:${formWidth}px;` } });
-              const baseBtn = `padding:8px 20px; font-size:14px; font-weight:500; border:none; border-radius:${radius}; cursor:pointer; line-height:20px;`;
-              const cancelBtn = btnRow.createEl("button", { text: "Cancel", attr: { style: baseBtn + "background:var(--background-modifier-border); color:var(--text-normal);" } });
-              this.okBtn = btnRow.createEl("button", { text: "Create", attr: { style: baseBtn + "background:var(--interactive-accent); color:var(--text-on-accent,#fff);" } });
+              const btnRow = this.wrapper.createEl("div", { cls: "oo-btn-row" });
+              const cancelBtn = btnRow.createEl("button", { text: "Cancel", cls: "oo-btn oo-btn-cancel" });
+              this.okBtn = btnRow.createEl("button", { text: "Create", cls: "oo-btn oo-btn-primary" });
               this.okBtn.addEventListener("click", () => {
                 const v = this.input.value.trim();
                 if (v) {
@@ -11786,6 +11719,10 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
       }
       let templateData;
       const adapter = this.app.vault.adapter;
+      if (!(adapter instanceof import_obsidian.FileSystemAdapter)) {
+        new import_obsidian.Notice("OnlyOffice: File creation requires a filesystem vault");
+        return;
+      }
       const base = adapter.getBasePath();
       const pluginDir = this.manifest.dir && path.isAbsolute(this.manifest.dir) ? this.manifest.dir : path.join(base, this.manifest.dir || "");
       const wantedExt = chosenType;
@@ -11802,7 +11739,8 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
           const copy = new Uint8Array(slice.length);
           copy.set(slice);
           templateData = copy.buffer;
-          console.log("OnlyOffice: using template", p, "for new", wantedExt);
+          if (this.settings.debugLogging)
+            console.log("OnlyOffice: using template", p, "for new", wantedExt);
           break;
         }
       }
@@ -11813,7 +11751,8 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
           const copy = new Uint8Array(buf.length);
           copy.set(buf);
           templateData = copy.buffer;
-          console.log("OnlyOffice: using embedded minimal DOCX fallback (no template found)");
+          if (this.settings.debugLogging)
+            console.log("OnlyOffice: using embedded minimal DOCX fallback (no template found)");
         } catch (e) {
           console.error("OnlyOffice: failed to build minimal DOCX fallback, creating empty file", e);
           templateData = new ArrayBuffer(0);
@@ -11835,7 +11774,8 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
         }
       }
       const file = await this.app.vault.createBinary(finalName, templateData);
-      console.log("OnlyOffice: created new document", finalName, "size", templateData.byteLength, "prompted?", !!requestedName);
+      if (this.settings.debugLogging)
+        console.log("OnlyOffice: created new document", finalName, "size", templateData.byteLength, "prompted?", !!requestedName);
       await this.openOnlyOfficeFile(file);
     } catch (e) {
       console.error("OnlyOffice: failed to create new document", e);
@@ -11860,11 +11800,13 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
     }
     const resolvedPluginPath = pluginPath && path.isAbsolute(pluginPath) ? pluginPath : __dirname;
     const editorHtmlPath = path.join(resolvedPluginPath, "editor.html");
-    console.log("Vault path:", vaultPath);
-    console.log("Plugin path:", pluginPath);
-    console.log("Resolved plugin path:", resolvedPluginPath);
-    console.log("Editor HTML path:", editorHtmlPath);
-    console.log("Editor HTML exists:", fs.existsSync(editorHtmlPath));
+    if (this.settings.debugLogging) {
+      console.log("Vault path:", vaultPath);
+      console.log("Plugin path:", pluginPath);
+      console.log("Resolved plugin path:", resolvedPluginPath);
+      console.log("Editor HTML path:", editorHtmlPath);
+      console.log("Editor HTML exists:", fs.existsSync(editorHtmlPath));
+    }
     const explicitPort = this.settings.htmlServerPort && this.settings.htmlServerPort > 0 ? this.settings.htmlServerPort : 0;
     const hashVault = (s) => {
       let h = 0;
@@ -11890,7 +11832,8 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
       try {
         this.httpServer = http.createServer((req, res) => {
           var _a2;
-          console.log("[HTTP] Request URL:", req.url);
+          if (this.settings.debugLogging)
+            console.log("[HTTP] Request URL:", req.url);
           res.setHeader("Access-Control-Allow-Origin", "*");
           res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
           res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -11934,8 +11877,10 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
               });
             } else {
               const filePath = path.join(vaultPath, reqPath.replace(/^\//, ""));
-              console.log("Attempting to serve file:", filePath);
-              console.log("File exists:", fs.existsSync(filePath));
+              if (this.settings.debugLogging) {
+                console.log("Attempting to serve file:", filePath);
+                console.log("File exists:", fs.existsSync(filePath));
+              }
               if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
                 const mimeType = mime.lookup(filePath) || "application/octet-stream";
                 res.writeHead(200, {
@@ -11988,12 +11933,13 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
             }
           }
         }
-        console.log(`OnlyOffice internal HTML server running at:`);
-        console.log(`  Local:   http://127.0.0.1:${port}/embedded-editor.html`);
+        console.log(`OnlyOffice internal HTML server running (local http://127.0.0.1:${port}/embedded-editor.html)`);
         if (!this.settings.restrictToLocalhost) {
-          lanIps.forEach((ip) => console.log(`  LAN:     http://${ip}:${port}/`));
+          if (this.settings.debugLogging)
+            lanIps.forEach((ip) => console.log(`  LAN:     http://${ip}:${port}/`));
         } else {
-          console.log("  LAN:     (disabled by restrictToLocalhost setting)");
+          if (this.settings.debugLogging)
+            console.log("LAN listing disabled by restrictToLocalhost setting");
         }
         try {
           const testResponse = await (0, import_obsidian.requestUrl)({
@@ -12001,7 +11947,8 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
             method: "HEAD",
             headers: { "Cache-Control": "no-cache" }
           });
-          console.log("Server test result:", testResponse.status);
+          if (this.settings.debugLogging)
+            console.log("Server test result:", testResponse.status);
         } catch (err) {
           console.error("Server test failed:", err);
         }
@@ -12022,7 +11969,7 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
   }
   // Start an internal OnlyOffice callback server
   async startCallbackServer() {
-    var _a, _b;
+    var _a;
     if (!(this.app.vault.adapter instanceof import_obsidian.FileSystemAdapter)) {
       console.warn("OnlyOffice callback server requires a file system adapter.");
       this.callbackServerPort = 0;
@@ -12156,21 +12103,24 @@ var OnlyOfficePlugin = class extends import_obsidian.Plugin {
             resolve2();
           });
         });
-        const actual = ((_a = this.callbackServer.address()) == null ? void 0 : _a.port) || tryPort;
+        const addrInfo = this.callbackServer.address();
+        const actual = typeof addrInfo === "object" && addrInfo && "port" in addrInfo ? addrInfo.port : tryPort;
         chosenPort = actual;
         this.callbackServerPort = actual;
         serverStarted = true;
-        console.log(`OnlyOffice callback server running at http://127.0.0.1:${actual}/ (candidate requested ${tryPort})`);
+        if (this.settings.debugLogging)
+          console.log(`OnlyOffice callback server running at http://127.0.0.1:${actual}/ (candidate requested ${tryPort})`);
         try {
           const test = await (0, import_obsidian.requestUrl)({ url: `http://127.0.0.1:${actual}/`, method: "HEAD", headers: { "Cache-Control": "no-cache" } });
-          console.log("Callback server test status:", test.status);
+          if (this.settings.debugLogging)
+            console.log("Callback server test status:", test.status);
         } catch (e) {
           console.warn("Callback server test failed:", e.message);
         }
       } catch (err) {
         console.warn(`Callback server port ${tryPort} failed:`, err.message);
         try {
-          (_b = this.callbackServer) == null ? void 0 : _b.close();
+          (_a = this.callbackServer) == null ? void 0 : _a.close();
         } catch (e) {
         }
         this.callbackServer = null;
@@ -12235,7 +12185,7 @@ var OnlyOfficeSettingTab = class extends import_obsidian.PluginSettingTab {
       await this.plugin.saveSettings();
     }));
     const advHeader = containerEl.createEl("h4", { text: "Advanced (normally leave defaults)" });
-    advHeader.style.marginTop = "1.5em";
+    advHeader.classList.add("onlyoffice-adv-header");
     new import_obsidian.Setting(containerEl).setName("Override HTML server port").setDesc("0 = automatic per-vault dynamic. Set only if you need a fixed port.").addText((text) => {
       var _a;
       return text.setPlaceholder("0 (auto)").setValue(String((_a = this.plugin.settings.htmlServerPort) != null ? _a : 0)).onChange(async (value) => {
@@ -12270,6 +12220,13 @@ var OnlyOfficeSettingTab = class extends import_obsidian.PluginSettingTab {
       var _a;
       return toggle.setValue((_a = this.plugin.settings.useSystemSaveAs) != null ? _a : false).onChange(async (value) => {
         this.plugin.settings.useSystemSaveAs = value;
+        await this.plugin.saveSettings();
+      });
+    });
+    new import_obsidian.Setting(containerEl).setName("Enable debug logging").setDesc("If ON, verbose diagnostic logs will appear in the developer console.").addToggle((toggle) => {
+      var _a;
+      return toggle.setValue((_a = this.plugin.settings.debugLogging) != null ? _a : false).onChange(async (value) => {
+        this.plugin.settings.debugLogging = value;
         await this.plugin.saveSettings();
       });
     });

@@ -19,6 +19,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { SignJWT } from 'jose';
 import * as http from 'http';
+import { AddressInfo } from 'net';
 import * as mime from 'mime-types'; // Add: npm install mime-types
 
 // Define the interface for plugin settings - RADICALLY SIMPLIFIED
@@ -33,6 +34,7 @@ interface OnlyOfficePluginSettings {
     hideDownloadAs?: boolean; // hide Download/Download copy menu entry
     promptNameOnCreate?: boolean; // prompt user for name before creating new file
     restrictToLocalhost?: boolean; // if true bind servers to 127.0.0.1 only
+    debugLogging?: boolean; // gate verbose console output
 }
 
 // Default settings - RADICALLY SIMPLIFIED
@@ -47,6 +49,7 @@ const DEFAULT_SETTINGS: OnlyOfficePluginSettings = {
     hideDownloadAs: true,
     promptNameOnCreate: true,
     restrictToLocalhost: false,
+    debugLogging: false,
 };
 
 // Define the OnlyOffice document view (reuse single view for multiple formats)
@@ -60,7 +63,7 @@ interface WebviewTag extends HTMLElement {
     addEventListener(type: 'did-finish-load', listener: () => void): void;
     addEventListener(type: 'did-fail-load', listener: (error: {errorCode: number, errorDescription: string, validatedURL: string}) => void): void;
     addEventListener(type: 'console-message', listener: (event: { level: number, message: string, line: number, sourceId: string }) => void): void;
-    addEventListener(type: 'ipc-message', listener: (event: { channel: string, args: any[] }) => void): void;
+    addEventListener(type: 'ipc-message', listener: (event: { channel: string, args: unknown[] }) => void): void;
 }
 
 // Add type declaration for DocsAPI on window object
@@ -93,6 +96,16 @@ interface IOnlyOfficePlugin extends Plugin {
     keyFileMap?: Record<string,string>;
 }
 
+// ---- Strong OnlyOffice typings ----
+interface OnlyOfficePermissions { edit:boolean; download:boolean; print:boolean; chat:boolean; comment:boolean; copy:boolean; fillForms:boolean; modifyContent:boolean; modifyFilter:boolean; review:boolean; rename:boolean; }
+interface OnlyOfficeDocumentConfig { fileType:string; key:string; title:string; url:string; permissions:OnlyOfficePermissions; }
+interface OnlyOfficeEditorCustomization { autosave:boolean; toolbarNoTabs:boolean; plugins:boolean; comments:boolean; compactChat:boolean; forcesave:boolean; }
+interface OnlyOfficeCoEditing { mode:string; change:boolean; fastCoAuthoring:boolean; }
+interface OnlyOfficeEditorUser { id:string; name:string; }
+interface OnlyOfficeEditorConfig { mode:string; lang:string; user:OnlyOfficeEditorUser; customization:OnlyOfficeEditorCustomization; callbackUrl:string; createUrl:string; saveAsUrl:string; coEditing:OnlyOfficeCoEditing; events?:Record<string,unknown>; }
+interface OnlyOfficeBaseConfig { documentType:string; document:OnlyOfficeDocumentConfig; editorConfig:OnlyOfficeEditorConfig; width:string; height:string; token?:string; events?:Record<string,unknown>; }
+interface OnlyOfficeJwtPayload { document:OnlyOfficeDocumentConfig; editorConfig:OnlyOfficeEditorConfig; iat:number; [k:string]: unknown; }
+
 /**
  * OnlyOffice Document View class
  * This class handles rendering of DOCX/XLSX/PPTX/PDF files in the OnlyOffice editor
@@ -105,7 +118,7 @@ class OnlyOfficeDocumentView extends FileView {
     private plugin: IOnlyOfficePlugin;
     public viewId: string; // Make viewId public and stable
     private boundMessageHandler: ((event: MessageEvent) => void) | null = null;
-    private fallbackEditor: HTMLElement | null = null;
+    // Fallback editor removed
     public isDirty: boolean = false; // Add a dirty flag
     private pendingSaveAsName: string | null = null; // store name chosen before download phase
     private saveButton: HTMLButtonElement | null = null;
@@ -171,7 +184,7 @@ class OnlyOfficeDocumentView extends FileView {
 
             // --- CRITICAL: Update this.file to the current file ---
             if (file) {
-                (this as any).file = file;
+                (this as unknown as { file: TFile }).file = file;
             }
 
             // --- Prevent recursive onLoadFile calls by handling view state updates first ---
@@ -189,12 +202,12 @@ class OnlyOfficeDocumentView extends FileView {
 
             // --- Clean up existing webview to avoid memory leaks ---
             if (this.webview) {
-                    if (this._didFinishLoadListener) {
-                        this.webview.removeEventListener('did-finish-load', this._didFinishLoadListener as any);
-                        this._didFinishLoadListener = null;
+                if (this._didFinishLoadListener) {
+                    this.webview.removeEventListener('did-finish-load', this._didFinishLoadListener);
+                    this._didFinishLoadListener = null;
                 }
                 if (this._didFailLoadListener) {
-                    this.webview.removeEventListener('did-fail-load', this._didFailLoadListener as any);
+                    this.webview.removeEventListener('did-fail-load', this._didFailLoadListener);
                     this._didFailLoadListener = null;
                 }
                 this.webview.remove();
@@ -338,7 +351,7 @@ class OnlyOfficeDocumentView extends FileView {
     async onUnloadFile(file: TFile): Promise<void> {
         // Trigger a save on close to prevent data loss, but only if the file is dirty.
         if (this.isDirty) {
-            console.log("OnlyOffice: onUnloadFile triggered for dirty file, attempting to save.");
+            if (this.plugin.settings.debugLogging) console.log("OnlyOffice: onUnloadFile triggered for dirty file, attempting to save.");
             try {
                 // Use the reliable callback mechanism for saving on close
                 this.webview?.executeJavaScript(`window.docEditor?.serviceCommand("c:forcesave", "");`);
@@ -347,7 +360,7 @@ class OnlyOfficeDocumentView extends FileView {
                 console.error("OnlyOffice: Failed to trigger save on close.", error);
             }
         } else {
-            console.log("OnlyOffice: onUnloadFile triggered for clean file, no save needed.");
+            if (this.plugin.settings.debugLogging) console.log("OnlyOffice: onUnloadFile triggered for clean file, no save needed.");
         }
 
         // Clean up resources here.
@@ -377,28 +390,28 @@ class OnlyOfficeDocumentView extends FileView {
         isStartDocx: boolean,
         uniqueKey?: string
     ): Promise<void> {
-        console.log('Loading OnlyOffice editor interface');
-    console.log('OnlyOffice debug: hostFileUrl', hostFileUrl, 'dockerFileUrl', dockerFileUrl, 'callbackUrl', callbackUrl);
+        if (this.plugin.settings.debugLogging) {
+            if (this.plugin.settings.debugLogging) {
+                console.log('Loading OnlyOffice editor interface');
+                console.log('OnlyOffice debug: hostFileUrl', hostFileUrl, 'dockerFileUrl', dockerFileUrl, 'callbackUrl', callbackUrl);
+            }
+        }
 
         // --- REMOVE unused editorHtmlUrl variable ---
         // const editorHtmlUrl = `http://127.0.0.1:${this.plugin.localServerPort}/editor.html?doc=${encodeURIComponent(file.path)}&v=${uniqueKey}`;
 
         // Clear container and set proper styling for flex layout
-        container.empty();
-        container.style.cssText = 'height: 100%; width: 100%; display: flex; flex-direction: column;';
+    container.empty();
+    container.classList.add('onlyoffice-root');
         
 
     // (Removed legacy host toolbar with extra New / Save As buttons; OnlyOffice's built-in UI now handles these actions.)
 
         // Create container for webview
-        const webviewContainer = container.createEl('div', { 
-            attr: { style: 'flex-grow: 1; position: relative; width: 100%; height: 100%;' } 
-        });
+    const webviewContainer = container.createEl('div', { cls: 'onlyoffice-webview-wrapper' });
 
         // Add a loading indicator
-        const loadingDiv = container.createEl('div', {
-            attr: { style: 'position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 10; background: rgba(255,255,255,0.9); padding: 24px 40px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); font-size: 1.2em; color: #333;' }
-        });
+    const loadingDiv = container.createEl('div', { cls: 'onlyoffice-loading' });
         loadingDiv.textContent = 'Loading OnlyOffice editor...';
 
         // --- REMOVE old listener properties ---
@@ -417,7 +430,7 @@ class OnlyOfficeDocumentView extends FileView {
     webview.setAttribute('webpreferences', 'contextIsolation=false, nodeIntegration=true');
     webview.setAttribute('partition', 'persist:onlyoffice');
     webview.setAttribute('allowpopups', 'true');
-        webview.style.cssText = 'width: 100%; height: 100%; border: none;';
+    webview.classList.add('onlyoffice-webview');
     webview.src = `http://127.0.0.1:${this.plugin.localServerPort}/embedded-editor.html`;
         webviewContainer.appendChild(webview);
 
@@ -431,11 +444,11 @@ class OnlyOfficeDocumentView extends FileView {
     const documentType = ext === 'xlsx' ? 'cell' : ext === 'pptx' ? 'slide' : ext === 'pdf' ? 'word' : 'word'; // pdf opened in word viewer mode
 
         // Build the base config ON THE HOST (without events) so we can sign exactly what the editor will use
-        const baseConfig = {
+    const baseConfig: OnlyOfficeBaseConfig = {
             documentType: documentType,
             document: {
                 fileType: ext || 'docx',
-                key: uniqueKey,
+                key: uniqueKey || 'oo_key_missing',
                 title: file ? file.name : (documentUrl.split('/').pop() || 'Document.docx'),
                 url: documentUrl,
                 permissions: {
@@ -479,7 +492,7 @@ class OnlyOfficeDocumentView extends FileView {
             },
             width: "100%",
             height: "100%"
-        } as any;
+    };
 
         // If a JWT secret is provided, generate tokens:
         // 1) requestToken for request verification, appended to URLs
@@ -500,16 +513,16 @@ class OnlyOfficeDocumentView extends FileView {
                     baseConfig.editorConfig.callbackUrl = append(baseConfig.editorConfig.callbackUrl);
                     baseConfig.editorConfig.createUrl = append(baseConfig.editorConfig.createUrl);
                     baseConfig.editorConfig.saveAsUrl = append(baseConfig.editorConfig.saveAsUrl);
-                    console.log('OnlyOffice: appended request token to URLs');
+                    if (this.plugin.settings.debugLogging) console.log('OnlyOffice: appended request token to URLs');
                 } else {
-                    console.log('OnlyOffice: request token appending disabled');
+                    if (this.plugin.settings.debugLogging) console.log('OnlyOffice: request token appending disabled');
                 }
 
-                const payload = {
+                const payload: OnlyOfficeJwtPayload = {
                     document: baseConfig.document,
                     editorConfig: { ...baseConfig.editorConfig },
                     iat: Math.floor(Date.now() / 1000)
-                } as any;
+                };
                 signedToken = await new SignJWT(payload)
                     .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
                     .sign(secret);
@@ -521,7 +534,7 @@ class OnlyOfficeDocumentView extends FileView {
 
         // --- Inject config and API script URL, then load the simplified HTML ---
         webview.addEventListener('did-finish-load', () => {
-            console.log('OnlyOffice webview did-finish-load, injecting init script');
+            if (this.plugin.settings.debugLogging) console.log('OnlyOffice webview did-finish-load, injecting init script');
             // Define the API script URL
             const apiScriptUrl = `http://${this.plugin.settings.localServerAddress || 'host.docker.internal'}:${this.plugin.settings.onlyOfficeServerPort}/web-apps/apps/api/documents/api.js`;
             
@@ -537,7 +550,7 @@ class OnlyOfficeDocumentView extends FileView {
                 const script = document.createElement('script');
                 script.src = '${apiScriptUrl}';
                 script.onload = function() {
-                    console.log('API script loaded');
+                    if (console && console.log) console.log('API script loaded');
                     try {
                         const { ipcRenderer } = (typeof require === 'function' ? require('electron') : { ipcRenderer: null });
                         const __sendToHost = (channel, data) => {
@@ -593,7 +606,7 @@ class OnlyOfficeDocumentView extends FileView {
                 __sendToHost('onlyoffice-create-new', { fileType: (event && event.data && event.data['fileType']) || 'docx' });
                             },
                             onRequestSaveAs: function(event) {
-                                console.log('OnlyOffice onRequestSaveAs', event);
+                                if (console && console.log) console.log('OnlyOffice onRequestSaveAs', event);
                 __sendToHost('onlyoffice-save-as', event && event.data ? event.data : {});
                             }
                         };
@@ -639,7 +652,7 @@ class OnlyOfficeDocumentView extends FileView {
                                     try {
                                         if (window.docEditor && !window.docEditor[guardProp] && window.docEditor.downloadAs) {
                                             const orig = window.docEditor.downloadAs.bind(window.docEditor);
-                                            window.docEditor.downloadAs = function(){ console.log('OnlyOffice: downloadAs blocked'); return null; };
+                                            window.docEditor.downloadAs = function(){ if (console && console.log) console.log('OnlyOffice: downloadAs blocked'); return null; };
                                             window.docEditor[guardProp] = true;
                                         }
                                     } catch(e){}
@@ -670,7 +683,8 @@ class OnlyOfficeDocumentView extends FileView {
                         // (Removed legacy attachEvent attempts to reduce errors)
                     } catch (e) {
                         console.error("Error initializing editor with dynamic config:", e);
-                        document.getElementById('placeholder').innerHTML = '<div style="padding: 20px; color: red;">Failed to initialize editor: ' + e.message + '</div>';
+                        const ph = document.getElementById('placeholder');
+                        if (ph) { ph.textContent = 'Failed to initialize editor: ' + (e && e.message ? e.message : 'Unknown error'); }
                     }
                 };
                 document.head.appendChild(script);
@@ -800,114 +814,20 @@ class OnlyOfficeDocumentView extends FileView {
         const errorDiv = container.createEl('div', { cls: 'onlyoffice-error' });
         errorDiv.createEl('h2', { text: 'OnlyOffice Editor Error' });
         errorDiv.createEl('p', { text: message });
-        
-        // Add fallback editor option
-        const fallbackButton = errorDiv.createEl('button', { 
-            text: 'Use Fallback Editor',
-            attr: { style: 'margin-top: 10px; padding: 8px 16px; background: #007ACC; color: white; border: none; border-radius: 4px; cursor: pointer;' }
-        });
-        fallbackButton.addEventListener('click', () => {
-            this.loadFallbackEditor(container);
-        });
+        errorDiv.createEl('p', { text: 'Verify the internal server, OnlyOffice Document Server, and JWT secret (if enabled).' });
     }
 
     // Load a simple fallback editor
-    private loadFallbackEditor(container: HTMLElement): void {
-        container.empty();
-        
-        // Create a simple rich text editor
-        const editorDiv = container.createEl('div', {
-            attr: {
-                style: 'width: 100%; height: 100%; display: flex; flex-direction: column; background: white;'
-            }
-        });
-        
-        // Add toolbar
-        const toolbar = editorDiv.createEl('div', {
-            attr: {
-                style: 'padding: 8px; border-bottom: 1px solid #ccc; background: #f5f5f5; display: flex; gap: 8px; flex-shrink: 0;'
-            }
-        });
-        
-        // Add toolbar buttons
-        this.addToolbarButton(toolbar, 'Bold', () => document.execCommand('bold'));
-        this.addToolbarButton(toolbar, 'Italic', () => document.execCommand('italic'));
-        this.addToolbarButton(toolbar, 'Underline', () => document.execCommand('underline'));
-        
-        // Add save button
-        const saveButton = toolbar.createEl('button', {
-            text: 'Save to Obsidian',
-            attr: {
-                style: 'margin-left: auto; padding: 4px 12px; background: #007ACC; color: white; border: none; border-radius: 4px; cursor: pointer;'
-            }
-        });
-        saveButton.addEventListener('click', () => this.saveFallbackToObsidian());
-        
-        // Create editor area
-        this.fallbackEditor = editorDiv.createEl('div', {
-            attr: {
-                contenteditable: 'true',
-                style: 'flex: 1; padding: 20px; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.5; overflow-y: auto; background: white;'
-            }
-        });
-        this.fallbackEditor.innerHTML = '<p>Start typing your document here...</p>';
-        this.fallbackEditor.focus();
-    }
+    // Fallback editor removed
 
     // Add toolbar button helper
-    private addToolbarButton(toolbar: HTMLElement, text: string, action: () => void): void {
-        const button = toolbar.createEl('button', {
-            text: text,
-            attr: {
-                style: 'padding: 4px 8px; border: 1px solid #ccc; background: white; cursor: pointer; border-radius: 3px;'
-            }
-        });
-        button.addEventListener('click', action);
-    }
+    // Toolbar helper removed
 
     // Save fallback editor content to Obsidian
-    private async saveFallbackToObsidian(): Promise<void> {
-        if (!this.fallbackEditor) {
-            new Notice('No content to save');
-            return;
-        }
-        try {
-            const htmlContent = this.fallbackEditor.innerHTML;
-            const markdownContent = OnlyOfficeDocumentView.htmlToMarkdown(htmlContent);
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const fileName = `OnlyOffice Document ${timestamp}.md`;
-            await this.app.vault.create(fileName, markdownContent);
-            new Notice(`Document saved as: ${fileName}`);
-            const file = this.app.vault.getAbstractFileByPath(fileName);
-            if (file instanceof TFile) {
-                await this.app.workspace.openLinkText(fileName, '');
-            }
-        } catch (error) {
-            console.error('Error saving to Obsidian:', error);
-            new Notice('Error saving document: ' + error.message);
-        }
-    }
+    // saveFallbackToObsidian removed
 
     // Static HTML to Markdown converter for fallback editor
-    private static htmlToMarkdown(html: string): string {
-        let markdown = html
-            .replace(/<strong[^>]*>(.*?)<\/strong>/gi, '**$1**')
-            .replace(/<b[^>]*>(.*?)<\/b>/gi, '**$1**')
-            .replace(/<em[^>]*>(.*?)<\/em>/gi, '*$1*')
-            .replace(/<i[^>]*>(.*?)<\/i>/gi, '*$1*')
-            .replace(/<u[^>]*>(.*?)<\/u>/gi, '<u>$1</u>')
-            .replace(/<p[^>]*>(.*?)<\/p>/gi, '$1\n\n')
-            .replace(/<br[^>]*>/gi, '\n')
-            .replace(/<div[^>]*>(.*?)<\/div>/gi, '$1\n')
-            .replace(/<[^>]*>/g, '') // Remove remaining HTML tags
-            .replace(/&nbsp;/g, ' ')
-            .replace(/&amp;/g, '&')
-            .replace(/&lt;/g, '<')
-            .replace(/&gt;/g, '>')
-            .replace(/\n\s*\n\s*\n/g, '\n\n')
-            .trim();
-        return markdown || 'Empty document';
-    }
+    // htmlToMarkdown removed
 
     // Add a manual save method as fallback
     private async manualSaveFromEditor(): Promise<void> {
@@ -939,10 +859,7 @@ class OnlyOfficeDocumentView extends FileView {
     // Add the missing saveAsDocument method with improved functionality
     async saveAsDocument(forceSaveAs = false, saveAsData?: any): Promise<void> {
         // For the fallback editor, save content to Obsidian
-        if (this.fallbackEditor) {
-            await this.saveFallbackToObsidian();
-            return;
-        }
+    // Fallback removed
 
         try {
             // If we have data from the OnlyOffice Save As event
@@ -1099,7 +1016,7 @@ class SaveAsModal extends Modal {
         });
 
         const cancelButton = contentEl.createEl('button', { text: 'Cancel' });
-        cancelButton.style.marginLeft = '10px';
+    cancelButton.classList.add('onlyoffice-cancel-btn');
         cancelButton.addEventListener('click', () => {
             this.close();
         });
@@ -1137,6 +1054,27 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         await this.loadSettings();
         await this.startInternalServer(); // Start internal HTTP server
         await this.startCallbackServer(); // Start callback server
+
+        // Inject stylesheet (scoped classes) if present
+        try {
+            const cssPath = path.join(this.manifest.dir || '', 'styles.css');
+            // Obsidian auto-loads styles.css if packaged at root; fallback manual load if needed
+            if (fs.existsSync(path.join((this.app.vault.adapter as any).getBasePath?.() || '', cssPath))) {
+                // Rely on Obsidian standard behavior; no-op
+            } else {
+                // Attempt dynamic injection from plugin directory (dev mode)
+                const localCss = path.join(__dirname, 'styles.css');
+                if (fs.existsSync(localCss)) {
+                    const css = fs.readFileSync(localCss, 'utf-8');
+                    this.registerDomEvent(document, 'DOMContentLoaded', () => {
+                        const styleEl = document.createElement('style');
+                        styleEl.setAttr('id', 'onlyoffice-styles-inline');
+                        styleEl.textContent = css;
+                        document.head.appendChild(styleEl);
+                    });
+                }
+            }
+        } catch (e) { if (this.settings?.debugLogging) console.warn('OnlyOffice: failed to inject stylesheet', e); }
         
         // Add ribbon icon for creating a new document
         this.addRibbonIcon('file-plus', 'New OnlyOffice Document', () => {
@@ -1150,12 +1088,12 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         );
         
     // Try to register file extensions (docx + xlsx + pptx + pdf). If already registered, add context menu fallbacks.
-        const officeExts = ['docx','xlsx','pptx','pdf'];
+    const officeExts = ['docx','xlsx','pptx','pdf'];
         const failed: string[] = [];
         for (const ext of officeExts) {
             try {
                 this.registerExtensions([ext], VIEW_TYPE_ONLYOFFICE);
-                console.log(`OnlyOffice: registered extension .${ext}`);
+        if (this.settings.debugLogging) console.log(`OnlyOffice: registered extension .${ext}`);
             } catch (e) {
                 failed.push(ext);
                 console.warn(`OnlyOffice: failed to register .${ext}:`, (e as any)?.message || e);
@@ -1186,7 +1124,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         // Add a command to open a DOCX file in OnlyOffice
         this.addCommand({
             id: 'open-docx-in-onlyoffice',
-            name: 'Open DOCX in OnlyOffice',
+            name: 'Open DOCX',
             checkCallback: (checking: boolean) => {
                 // Check if a file is active and is a DOCX file
                 const file = this.app.workspace.getActiveFile();
@@ -1203,7 +1141,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         // Command to open XLSX
         this.addCommand({
             id: 'open-xlsx-in-onlyoffice',
-            name: 'Open XLSX in OnlyOffice',
+            name: 'Open XLSX',
             checkCallback: (checking: boolean) => {
                 const file = this.app.workspace.getActiveFile();
                 if (file && file.extension === 'xlsx') {
@@ -1219,7 +1157,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         // Command to open PPTX
         this.addCommand({
             id: 'open-pptx-in-onlyoffice',
-            name: 'Open PPTX in OnlyOffice',
+            name: 'Open PPTX',
             checkCallback: (checking: boolean) => {
                 const file = this.app.workspace.getActiveFile();
                 if (file && file.extension === 'pptx') {
@@ -1235,7 +1173,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         // Command to open PDF (viewer mode)
         this.addCommand({
             id: 'open-pdf-in-onlyoffice',
-            name: 'Open PDF in OnlyOffice (viewer)',
+            name: 'Open PDF (viewer)',
             checkCallback: (checking: boolean) => {
                 const file = this.app.workspace.getActiveFile();
                 if (file && file.extension === 'pdf') {
@@ -1251,12 +1189,14 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         // Debug command: list detected vs on-disk office files
         this.addCommand({
             id: 'onlyoffice-list-office-files',
-            name: 'OnlyOffice: List Office Files (debug)',
+            name: 'List Office Files (debug)',
             callback: async () => {
                 try {
                     const vaultFiles = this.app.vault.getFiles().filter(f=>['docx','xlsx','pptx','pdf'].includes(f.extension));
-                    console.log('OnlyOffice DEBUG: vault reports', vaultFiles.length, 'office files');
-                    vaultFiles.forEach(f=>console.log('  VAULT:', f.path));
+                    if (this.settings.debugLogging) {
+                        console.log('OnlyOffice DEBUG: vault reports', vaultFiles.length, 'office files');
+                        vaultFiles.forEach(f=>console.log('  VAULT:', f.path));
+                    }
                     // Disk scan
                     if (!(this.app.vault.adapter instanceof FileSystemAdapter)) { console.log('OnlyOffice DEBUG: not FS adapter, cannot disk-scan'); return; }
                     const root = this.app.vault.adapter.getBasePath();
@@ -1274,13 +1214,15 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                         }
                     };
                     walk(root);
-                    console.log('OnlyOffice DEBUG: disk scan found', found.length, 'office files');
+                    if (this.settings.debugLogging) console.log('OnlyOffice DEBUG: disk scan found', found.length, 'office files');
                     const rel = (p:string)=> p.replace(/\\/g,'/').substring(root.replace(/\\/g,'/').length+1);
                     const vaultSet = new Set(vaultFiles.map(f=>f.path));
                     const missingInVault = found.map(rel).filter(p=>!vaultSet.has(p));
-                    if (missingInVault.length===0) console.log('OnlyOffice DEBUG: no discrepancies');
-                    else {
-                        console.warn('OnlyOffice DEBUG: files on disk NOT in vault index:', missingInVault);
+                    if (this.settings.debugLogging) {
+                        if (missingInVault.length===0) console.log('OnlyOffice DEBUG: no discrepancies');
+                        else {
+                            console.warn('OnlyOffice DEBUG: files on disk NOT in vault index:', missingInVault);
+                        }
                     }
                     new Notice('OnlyOffice: debug listing complete (see console)');
                 } catch (e) {
@@ -1289,27 +1231,11 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                 }
             }
         });
-
-        // Add a command to open an XLSX file in OnlyOffice
-        this.addCommand({
-            id: 'open-xlsx-in-onlyoffice',
-            name: 'Open XLSX in OnlyOffice',
-            checkCallback: (checking: boolean) => {
-                const file = this.app.workspace.getActiveFile();
-                if (file && file.extension === 'xlsx') {
-                    if (!checking) {
-                        this.openOnlyOfficeFile(file);
-                    }
-                    return true;
-                }
-                return false;
-            }
-        });
         
         // Add a command to create a new OnlyOffice document
         this.addCommand({
             id: 'create-new-onlyoffice-document',
-            name: 'Create New OnlyOffice Document',
+            name: 'Create New Document',
             callback: () => {
                 this.openNewDocument();
             }
@@ -1323,49 +1249,34 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
             let requestedName: string | null = null;
             let chosenType: 'docx'|'xlsx'|'pptx' = 'docx';
             if (this.settings?.promptNameOnCreate !== false) {
-                requestedName = await new Promise<string | null>((resolve) => {
-                    const modal = new (class extends Modal {
-                        private input!: HTMLInputElement; submitted=false; private select!: HTMLSelectElement; private wrapper!: HTMLElement; private okBtn!: HTMLButtonElement;
-                        onOpen() {
-                            const radius='10px';
-                            const fieldHeight='40px';
-                            const {contentEl} = this;
-                            contentEl.empty();
-                            contentEl.style.padding = '26px 32px 22px';
-                            // Narrow the modal a bit and ensure no horizontal scroll
-                            contentEl.style.minWidth = '600px';
-                            contentEl.style.maxWidth = '600px';
-                            contentEl.style.boxSizing = 'border-box';
-                            contentEl.style.overflow = 'hidden';
-                            contentEl.style.overflowX = 'hidden';
-                            if (contentEl.parentElement) {
-                                (contentEl.parentElement as HTMLElement).style.overflowX = 'hidden';
+                    requestedName = await new Promise<string | null>((resolve) => {
+                        const modal = new (class extends Modal {
+                            private input!: HTMLInputElement; submitted=false; private select!: HTMLSelectElement; private wrapper!: HTMLElement; private okBtn!: HTMLButtonElement;
+                            onOpen() {
+                                const {contentEl} = this;
+                                contentEl.empty();
+                                contentEl.classList.add('oo-modal');
+                                contentEl.createEl('h2', { text: 'New OnlyOffice Document' });
+                                this.wrapper = contentEl.createEl('div', { cls: 'oo-form-wrapper' });
+                                const row = this.wrapper.createEl('div', { cls: 'oo-grid' });
+                                const nameCol = row.createEl('div', { cls: 'oo-field-col' });
+                                nameCol.createEl('label', { text: 'Filename' });
+                                this.input = nameCol.createEl('input', { type: 'text', placeholder: 'MyDocument', cls: 'oo-input' });
+                                const typeCol = row.createEl('div', { cls: 'oo-field-col' });
+                                typeCol.createEl('label', { text: 'Type' });
+                                this.select = typeCol.createEl('select', { cls: 'oo-select' });
+                                ['docx','xlsx','pptx'].forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t.toUpperCase(); this.select.appendChild(o); });
+                                const btnRow = this.wrapper.createEl('div', { cls: 'oo-btn-row' });
+                                const cancelBtn = btnRow.createEl('button', { text: 'Cancel', cls: 'oo-btn oo-btn-cancel' });
+                                this.okBtn = btnRow.createEl('button', { text: 'Create', cls: 'oo-btn oo-btn-primary' });
+                                this.okBtn.addEventListener('click', () => { const v = this.input.value.trim(); if (v) { chosenType = this.select.value as 'docx'|'xlsx'|'pptx'; this.submitted = true; this.close(); resolve(v); } });
+                                cancelBtn.addEventListener('click', () => { this.close(); resolve(null); });
+                                this.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.okBtn.click(); }});
+                                this.input.focus();
                             }
-                            contentEl.createEl('h2', { text: 'New OnlyOffice Document', attr: { style: 'margin:0 0 16px 0; font-weight:600; font-size:22px; letter-spacing:.4px;' }});
-                            this.wrapper = contentEl.createEl('div', { attr: { style: 'display:flex; flex-direction:column; gap:16px;' }});
-                            // Fixed-width grid so we can align action buttons with right edge of dropdown.
-                            // Expand fields to fill available inner content width (600 - 64 padding = 536).
-                            const formGap = 18; const col1 = 320; const col2 = 118; const formWidth = col1 + col2 + formGap; // 536
-                            const row = this.wrapper.createEl('div', { attr: { style: `display:grid; grid-template-columns: ${col1}px ${col2}px; gap:${formGap}px; align-items:end; width:${formWidth}px;` }});
-                            const nameCol = row.createEl('div', { attr: { style: 'display:flex; flex-direction:column; gap:6px; min-width:0;' }});
-                            nameCol.createEl('label', { text: 'Filename', attr: { style: 'font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--text-muted);' }});
-                            this.input = nameCol.createEl('input', { type: 'text', placeholder: 'MyDocument', attr: { style: `padding:8px 12px; font-size:14px; line-height:20px; height:${fieldHeight}; border:1px solid var(--background-modifier-border); border-radius:${radius}; width:100%; max-width:${col1}px; box-sizing:border-box;` }});
-                            const typeCol = row.createEl('div', { attr: { style: 'display:flex; flex-direction:column; gap:6px;'} });
-                            typeCol.createEl('label', { text: 'Type', attr: { style: 'font-size:11px; font-weight:600; letter-spacing:.5px; text-transform:uppercase; color:var(--text-muted);' }});
-                            this.select = typeCol.createEl('select', { attr: { style: `padding:8px 12px; font-size:14px; line-height:20px; height:${fieldHeight}; border:1px solid var(--background-modifier-border); border-radius:${radius}; background:var(--background-primary); box-sizing:border-box; width:${col2}px;` }});
-                            ['docx','xlsx','pptx'].forEach(t => { const o = document.createElement('option'); o.value = t; o.textContent = t.toUpperCase(); this.select.appendChild(o); });
-                            const btnRow = this.wrapper.createEl('div', { attr: { style: `display:flex; justify-content:flex-end; gap:10px; margin-top:6px; width:${formWidth}px;` }});
-                            const baseBtn = `padding:8px 20px; font-size:14px; font-weight:500; border:none; border-radius:${radius}; cursor:pointer; line-height:20px;`;
-                            const cancelBtn = btnRow.createEl('button', { text: 'Cancel', attr: { style: baseBtn + 'background:var(--background-modifier-border); color:var(--text-normal);' }});
-                            this.okBtn = btnRow.createEl('button', { text: 'Create', attr: { style: baseBtn + 'background:var(--interactive-accent); color:var(--text-on-accent,#fff);' }});
-                            this.okBtn.addEventListener('click', () => { const v = this.input.value.trim(); if (v) { (chosenType as any) = this.select.value; this.submitted = true; this.close(); resolve(v); } });
-                            cancelBtn.addEventListener('click', () => { this.close(); resolve(null); });
-                            this.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); this.okBtn.click(); }});
-                            this.input.focus();
-                        }
-                        onClose() { if (!this.submitted) resolve(null); this.contentEl.empty(); }
-                    })(this.app);
-                    modal.open();
+                            onClose() { if (!this.submitted) resolve(null); this.contentEl.empty(); }
+                        })(this.app);
+                        modal.open();
                 });
                 if (requestedName === null) { new Notice('Creation cancelled'); return; }
                 requestedName = requestedName.replace(/[\\/:*?"<>|]/g,'').trim();
@@ -1381,7 +1292,11 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
             }
             // Resolve a template matching chosenType (Start.docx / Start.xlsx / Start.pptx)
             let templateData: ArrayBuffer | undefined;
-            const adapter = this.app.vault.adapter as FileSystemAdapter;
+            const adapter = this.app.vault.adapter;
+            if (!(adapter instanceof FileSystemAdapter)) {
+                new Notice('OnlyOffice: File creation requires a filesystem vault');
+                return;
+            }
             const base = adapter.getBasePath();
             const pluginDir = this.manifest.dir && path.isAbsolute(this.manifest.dir) ? this.manifest.dir : path.join(base, this.manifest.dir || '');
             const wantedExt = chosenType; // map same names
@@ -1402,7 +1317,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                     const copy = new Uint8Array(slice.length);
                     copy.set(slice);
                     templateData = copy.buffer; // Pure ArrayBuffer
-                    console.log('OnlyOffice: using template', p, 'for new', wantedExt);
+                    if (this.settings.debugLogging) console.log('OnlyOffice: using template', p, 'for new', wantedExt);
                     break;
                 }
             }
@@ -1412,7 +1327,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                     const minimalB64 = 'UEsDBBQABgAIAAAAIQAAAAAAAAAAAAAAAAAJAAAAd29yZC9VVAkAA0oJZ2ZKCWdzdXgLAAEE9QEAAAQUAAAAAABQSwMEFAAIAAgAAAAhAAAAAAAAAAAAAAAAABwAAAB3b3JkL19yZWxzL2RvY3VtZW50LnhtbC5yZWxzVVQJAAOSAmdmkgJndXgLAAEE9QEAAAQUAAAAAABQSwMEFAAIAAgAAAAhAAAAAAAAAAAAAAAAADwAAAB3b3JkL2RvY3VtZW50LnhtbFVUCQADjQJnZ40CZ3V4CwABBPUBAAAQFAAAAAA8eG1sIHZlcnNpb249IjEuMCI+PHc6d29yZGRvYyB4bWxucz13PSJodHRwOi8vc2NoZW1hcy5vcGVub3hwb3J5Lm9yZy93b3JkcHJvYy8yMDA2L21haW4iPjx3OnNlY3Rpb24geG1sbnM6dyA9ICJodHRwOi8vc2NoZW1hcy5vcGVub3hwb3J5Lm9yZy93b3JkcHJvYy8yMDA2L21haW4iPjx3OnA+PC93OnA+PC93OnNlY3Rpb24+PC93OndvcmRkb2M+';
                     const buf = Buffer.from(minimalB64, 'base64');
                     const copy = new Uint8Array(buf.length); copy.set(buf); templateData = copy.buffer;
-                    console.log('OnlyOffice: using embedded minimal DOCX fallback (no template found)');
+                    if (this.settings.debugLogging) console.log('OnlyOffice: using embedded minimal DOCX fallback (no template found)');
                 } catch(e) {
                     console.error('OnlyOffice: failed to build minimal DOCX fallback, creating empty file', e);
                     templateData = new ArrayBuffer(0);
@@ -1432,7 +1347,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                 while (this.app.vault.getAbstractFileByPath(finalName)) { idx++; finalName = `${baseName} ${idx}.${wantedExt}`; }
             }
             const file = await this.app.vault.createBinary(finalName, templateData);
-            console.log('OnlyOffice: created new document', finalName, 'size', templateData.byteLength, 'prompted?', !!requestedName);
+            if (this.settings.debugLogging) console.log('OnlyOffice: created new document', finalName, 'size', templateData.byteLength, 'prompted?', !!requestedName);
             await this.openOnlyOfficeFile(file);
         } catch (e) {
             console.error('OnlyOffice: failed to create new document', e);
@@ -1461,11 +1376,13 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
         const editorHtmlPath = path.join(resolvedPluginPath, 'editor.html');
 
         // Debug paths to verify they're correct
-        console.log("Vault path:", vaultPath);
-        console.log("Plugin path:", pluginPath);
-        console.log("Resolved plugin path:", resolvedPluginPath);
-        console.log("Editor HTML path:", editorHtmlPath);
-        console.log("Editor HTML exists:", fs.existsSync(editorHtmlPath));
+                    if (this.settings.debugLogging) {
+                        console.log("Vault path:", vaultPath);
+                        console.log("Plugin path:", pluginPath);
+                        console.log("Resolved plugin path:", resolvedPluginPath);
+                        console.log("Editor HTML path:", editorHtmlPath);
+                        console.log("Editor HTML exists:", fs.existsSync(editorHtmlPath));
+                    }
 
         // Dynamic per-vault port strategy:
         // If user specified a port (>0), attempt only that. Otherwise derive a stable base from vault path hash.
@@ -1486,7 +1403,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
             try {
                 this.httpServer = http.createServer((req, res) => {
                     // --- LOG EVERY REQUEST ---
-                    console.log("[HTTP] Request URL:", req.url);
+                    if (this.settings.debugLogging) console.log("[HTTP] Request URL:", req.url);
 
                     // Add CORS headers to all responses
                     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1539,8 +1456,10 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                             });
                         } else {
                             const filePath = path.join(vaultPath, reqPath.replace(/^\//, ''));
-                            console.log("Attempting to serve file:", filePath);
-                            console.log("File exists:", fs.existsSync(filePath));
+                            if (this.settings.debugLogging) {
+                                console.log("Attempting to serve file:", filePath);
+                                console.log("File exists:", fs.existsSync(filePath));
+                            }
                             if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
                                 const mimeType = mime.lookup(filePath) || 'application/octet-stream';
                                 res.writeHead(200, {
@@ -1593,12 +1512,11 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                         }
                     }
                 }
-                console.log(`OnlyOffice internal HTML server running at:`);
-                console.log(`  Local:   http://127.0.0.1:${port}/embedded-editor.html`);
+                console.log(`OnlyOffice internal HTML server running (local http://127.0.0.1:${port}/embedded-editor.html)`);
                 if (!this.settings.restrictToLocalhost) {
-                    lanIps.forEach(ip => console.log(`  LAN:     http://${ip}:${port}/`));
+                    if (this.settings.debugLogging) lanIps.forEach(ip => console.log(`  LAN:     http://${ip}:${port}/`));
                 } else {
-                    console.log('  LAN:     (disabled by restrictToLocalhost setting)');
+                    if (this.settings.debugLogging) console.log('LAN listing disabled by restrictToLocalhost setting');
                 }
                 try {
                     const testResponse = await requestUrl({
@@ -1606,7 +1524,7 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                         method: 'HEAD',
                         headers: { 'Cache-Control': 'no-cache' }
                     });
-                    console.log("Server test result:", testResponse.status);
+                    if (this.settings.debugLogging) console.log("Server test result:", testResponse.status);
                 } catch (err) {
                     console.error("Server test failed:", err);
                 }
@@ -1726,14 +1644,15 @@ export default class OnlyOfficePlugin extends Plugin implements IOnlyOfficePlugi
                     this.callbackServer!.listen(tryPort, bindHost, ()=>{ clearTimeout(timeoutId); resolve(); });
                 });
                 // Resolve actual port (ephemeral case)
-                const actual = (this.callbackServer!.address() as any)?.port || tryPort;
+                const addrInfo = this.callbackServer!.address();
+                const actual = (typeof addrInfo === 'object' && addrInfo && 'port' in addrInfo) ? (addrInfo as AddressInfo).port : tryPort;
                 chosenPort = actual;
                 this.callbackServerPort = actual;
                 serverStarted = true;
-                console.log(`OnlyOffice callback server running at http://127.0.0.1:${actual}/ (candidate requested ${tryPort})`);
+                if (this.settings.debugLogging) console.log(`OnlyOffice callback server running at http://127.0.0.1:${actual}/ (candidate requested ${tryPort})`);
                 try {
                     const test = await requestUrl({ url: `http://127.0.0.1:${actual}/`, method: 'HEAD', headers: { 'Cache-Control': 'no-cache' } });
-                    console.log('Callback server test status:', test.status);
+                    if (this.settings.debugLogging) console.log('Callback server test status:', test.status);
                 } catch (e) { console.warn('Callback server test failed:', (e as Error).message); }
             } catch (err) {
                 console.warn(`Callback server port ${tryPort} failed:`, (err as Error).message);
@@ -1834,8 +1753,8 @@ class OnlyOfficeSettingTab extends PluginSettingTab {
                     this.plugin.settings.localServerAddress = value;
                     await this.plugin.saveSettings();
                 })));
-        const advHeader = containerEl.createEl('h4', { text: 'Advanced (normally leave defaults)' });
-        advHeader.style.marginTop = '1.5em';
+    const advHeader = containerEl.createEl('h4', { text: 'Advanced (normally leave defaults)' });
+    advHeader.classList.add('onlyoffice-adv-header');
 
         new Setting(containerEl)
             .setName('Override HTML server port')
@@ -1888,6 +1807,16 @@ class OnlyOfficeSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.useSystemSaveAs ?? false)
                 .onChange(async (value) => {
                     this.plugin.settings.useSystemSaveAs = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Enable debug logging')
+            .setDesc('If ON, verbose diagnostic logs will appear in the developer console.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.debugLogging ?? false)
+                .onChange(async (value) => {
+                    this.plugin.settings.debugLogging = value;
                     await this.plugin.saveSettings();
                 }));
     }
